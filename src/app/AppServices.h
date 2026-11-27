@@ -65,6 +65,7 @@ public:
     // Reactivite au son (capture du son joue par le PC + spectre)
     virtual void SetAudioReactive(bool reactive) = 0;
     virtual void SetAudioSensitivity(float sensitivity) = 0;
+    virtual void SetAudioAutoGain(bool enabled) = 0;
     virtual void CurrentAudio(AudioSpectrum& out) const = 0;  // spectre courant (sensibilite globale appliquee)
     virtual std::wstring AudioDeviceName() const = 0;
 

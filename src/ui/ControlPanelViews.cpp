@@ -1344,6 +1344,10 @@ void ControlPanelViews::DrawSettings() {
     if (ImGui::SliderFloat("Sensibilité##audio_sensitivity", &sensitivity, 0.0f, 4.0f, "%.2f")) {
         services_.SetAudioSensitivity(sensitivity);
     }
+    bool autoGain = config.audio.autoGain;
+    if (ImGui::Checkbox("Gain automatique (remonte les sources calmes)", &autoGain)) {
+        services_.SetAudioAutoGain(autoGain);
+    }
     // Spectre en direct (64 bandes) : retour immediat sur la capture.
     AudioSpectrum spectrum;
     services_.CurrentAudio(spectrum);

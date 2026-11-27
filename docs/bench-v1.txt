@@ -1,0 +1,5 @@
+aurora.hlsl | 20.0 s, 1161 images (58.0 FPS), 1201 reveils de boucle, CPU thread principal 969 ms, CPU processus 1016 ms
+plasma_spectrum.hlsl | 20.1 s, 1191 images (59.3 FPS), 1242 reveils de boucle, CPU thread principal 1000 ms, CPU processus 1000 ms
+logo.png | 20.1 s, 1193 images (59.4 FPS), 1246 reveils de boucle, CPU thread principal 234 ms, CPU processus 266 ms
+Cars.mp4 | 20.1 s, 1193 images (59.3 FPS), 1238 reveils de boucle, CPU thread principal 797 ms, CPU processus 1609 ms
+index.html | 20.1 s, 1192 images (59.3 FPS), 1291 reveils de boucle, CPU thread principal 312 ms, CPU processus 375 ms

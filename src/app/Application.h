@@ -30,6 +30,8 @@ struct CommandLineOptions {
     bool minimized = false;                   // --minimized : demarre sans ouvrir l'interface (demarrage Windows)
     double exitAfterSeconds = 0.0;            // --exit-after <s> : arret automatique (tests)
     std::filesystem::path wallpaperOverride;  // --wallpaper <fichier> : force un fond (non sauvegarde)
+    bool audioDebug = false;                  // --audio-debug : statistiques audio chaque seconde dans le journal
+    bool noAutoPause = false;                 // --no-autopause : ignore plein ecran / batterie (mesures)
 };
 
 CommandLineOptions ParseCommandLine();
@@ -63,6 +65,7 @@ public:
     void SetMuted(bool muted) override;
     void SetAudioReactive(bool reactive) override;
     void SetAudioSensitivity(float sensitivity) override;
+    void SetAudioAutoGain(bool enabled) override;
     void CurrentAudio(AudioSpectrum& out) const override;
     std::wstring AudioDeviceName() const override { return audioCapture_.DeviceName(); }
     bool IsManuallyPaused() const override { return (pauseReasons_ & kPauseManual) != 0; }
@@ -112,6 +115,7 @@ private:
     void UpdateAudioCapture();
     void ReplaceFailedBackends();
     void WatchdogTick();
+    PauseRules EffectivePauseRules() const;
     void MaintenanceTick();
     void PlaylistTick();
     std::vector<const LibraryItem*> RotationCandidates() const;

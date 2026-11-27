@@ -7,6 +7,8 @@
 #include <propidl.h>
 #include <wrl/client.h>
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -191,6 +193,51 @@ void AudioCapture::ThreadMain() {
         spectrum_ = spectrum;
     };
 
+    // Statistiques de diagnostic (--audio-debug), remises a zero chaque seconde.
+    struct DebugStats {
+        ULONGLONG start = 0;
+        uint64_t frames = 0;
+        uint64_t publishes = 0;
+        float peakSample = 0.0f;
+        float maxLevel = 0.0f;
+        double sumLevel = 0.0;
+        float maxBass = 0.0f, maxMid = 0.0f, maxTreble = 0.0f;
+        size_t peakBand = 0;
+        float peakBandValue = 0.0f;
+    } stats;
+    stats.start = GetTickCount64();
+    const auto range = [](const AudioSpectrum& s, size_t first, size_t last) {
+        float sum = 0.0f;
+        for (size_t i = first; i <= last; ++i) {
+            sum += s.bands[i];
+        }
+        return sum / static_cast<float>(last - first + 1);
+    };
+    const auto accumulate = [&](const AudioSpectrum& s, float gainDb) {
+        ++stats.publishes;
+        stats.maxLevel = std::max(stats.maxLevel, s.level);
+        stats.sumLevel += s.level;
+        stats.maxBass = std::max(stats.maxBass, range(s, 0, 7));
+        stats.maxMid = std::max(stats.maxMid, range(s, 8, 31));
+        stats.maxTreble = std::max(stats.maxTreble, range(s, 32, 63));
+        for (size_t i = 0; i < kAudioBandCount; ++i) {
+            if (s.bands[i] > stats.peakBandValue) {
+                stats.peakBandValue = s.bands[i];
+                stats.peakBand = i;
+            }
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (now - stats.start >= 1000) {
+            log::Info(L"Audio debug : {} ech., crete {:.3f}, niveau moy {:.2f} max {:.2f}, graves {:.2f}, medium {:.2f}, "
+                      L"aigus {:.2f}, bande max {} ({:.2f}), gain auto {:+.1f} dB",
+                      stats.frames, stats.peakSample, stats.publishes ? stats.sumLevel / stats.publishes : 0.0,
+                      stats.maxLevel, stats.maxBass, stats.maxMid, stats.maxTreble, stats.peakBand,
+                      stats.peakBandValue, gainDb);
+            stats = DebugStats{};
+            stats.start = now;
+        }
+    };
+
     while (true) {
         if (!session) {
             std::wstring error;
@@ -220,14 +267,27 @@ void AudioCapture::ThreadMain() {
             break;
         }
 
+        session->analyzer->SetAutoGain(autoGain_);
         bool received = false;
         bool failed = false;
         UINT32 packet = 0;
-        while (SUCCEEDED(session->capture->GetNextPacketSize(&packet)) && packet > 0) {
+        while (true) {
+            // Echec (AUDCLNT_E_DEVICE_INVALIDATED : peripherique desactive, format de mixage change...) :
+            // la session est rouverte, meme si la sortie par defaut reste la meme.
+            const HRESULT next = session->capture->GetNextPacketSize(&packet);
+            if (FAILED(next)) {
+                log::Warn(L"Audio : capture interrompue ({}), reouverture", HResultToString(next));
+                failed = true;
+                break;
+            }
+            if (packet == 0) {
+                break;
+            }
             BYTE* data = nullptr;
             UINT32 frames = 0;
             DWORD flags = 0;
-            if (FAILED(session->capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) {
+            if (const HRESULT hr = session->capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr); FAILED(hr)) {
+                log::Warn(L"Audio : lecture du tampon impossible ({}), reouverture", HResultToString(hr));
                 failed = true;
                 break;
             }
@@ -249,7 +309,9 @@ void AudioCapture::ThreadMain() {
                     }
                 }
                 mono[f] = sum / static_cast<float>(channels);
+                stats.peakSample = std::max(stats.peakSample, std::fabs(mono[f]));
             }
+            stats.frames += frames;
             session->capture->ReleaseBuffer(frames);
             if (session->analyzer->Push(mono.data(), mono.size())) {
                 received = true;
@@ -264,6 +326,9 @@ void AudioCapture::ThreadMain() {
             session->analyzer->Decay(kSilenceDecay);
         }
         publish(session->analyzer->Spectrum());
+        if (debug_) {
+            accumulate(session->analyzer->Spectrum(), session->analyzer->GainDb());
+        }
 
         // Sortie par defaut changee (casque, autre carte son) : on suit.
         const ULONGLONG now = GetTickCount64();

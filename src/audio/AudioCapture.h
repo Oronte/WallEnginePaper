@@ -29,12 +29,19 @@ public:
     std::wstring DeviceName() const;
     bool IsCapturing() const noexcept { return capturing_; }
 
+    // Diagnostic (--audio-debug) : resume du signal analyse une fois par seconde dans le journal.
+    void SetDebugLogging(bool enabled) noexcept { debug_ = enabled; }
+    // Gain automatique des sources calmes (voir SpectrumAnalyzer::SetAutoGain).
+    void SetAutoGain(bool enabled) noexcept { autoGain_ = enabled; }
+
 private:
     void ThreadMain();
 
     std::thread thread_;
     UniqueHandle stopEvent_;
     std::atomic<bool> capturing_{false};
+    std::atomic<bool> debug_{false};
+    std::atomic<bool> autoGain_{true};
 
     mutable std::mutex mutex_;
     AudioSpectrum spectrum_;

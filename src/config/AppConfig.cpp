@@ -241,6 +241,7 @@ std::string SerializeConfig(const AppConfig& config) {
         {"muted", config.audio.muted},
         {"reactive", config.audio.reactive},
         {"sensitivity", config.audio.sensitivity},
+        {"autoGain", config.audio.autoGain},
     };
     root["playlist"] = {
         {"enabled", config.playlist.enabled},
@@ -317,6 +318,7 @@ bool DeserializeConfig(std::string_view text, AppConfig& out, std::string& error
         ReadValue(*it, "muted", config.audio.muted);
         ReadValue(*it, "reactive", config.audio.reactive);
         ReadValue(*it, "sensitivity", config.audio.sensitivity);
+        ReadValue(*it, "autoGain", config.audio.autoGain);
     }
     if (const auto it = root.find("playlist"); it != root.end() && it->is_object()) {
         ReadValue(*it, "enabled", config.playlist.enabled);

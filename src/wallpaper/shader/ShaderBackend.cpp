@@ -87,9 +87,10 @@ float AudioRange(int first, int last)
     return sum / (float)(last - first + 1);
 }
 
-float AudioBass()   { return AudioRange(0, 7); }
-float AudioMid()    { return AudioRange(8, 31); }
-float AudioTreble() { return AudioRange(32, 63); }
+// ~20-260 Hz, ~260 Hz-3,9 kHz, ~3,9-16 kHz (a 48 kHz).
+float AudioBass()   { return AudioRange(0, 9); }
+float AudioMid()    { return AudioRange(10, 48); }
+float AudioTreble() { return AudioRange(49, 63); }
 
 float3 LweHueShift(float3 color, float degrees)
 {

@@ -64,6 +64,7 @@ struct AudioSettings {
     bool muted = false;
     bool reactive = true;  // capture WASAPI loopback + FFT
     float sensitivity = 1.0f;
+    bool autoGain = true;  // remonte les sources calmes (jusqu a +18 dB)
 };
 
 struct PlaylistSettings {

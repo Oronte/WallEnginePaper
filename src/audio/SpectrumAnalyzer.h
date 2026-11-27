@@ -31,6 +31,12 @@ public:
 
     const AudioSpectrum& Spectrum() const noexcept { return spectrum_; }
 
+    // Gain automatique : une source calme (musique classique, volume applicatif bas) est remontee
+    // jusqu a +18 dB pour occuper la meme plage visuelle qu un morceau masterise fort. Jamais d attenuation ;
+    // le gain est gele pendant les silences (pas d explosion a la reprise).
+    void SetAutoGain(bool enabled) noexcept { autoGain_ = enabled; }
+    float GainDb() const noexcept { return autoGain_ ? gainDb_ : 0.0f; }
+
     // Plage de frequences (Hz) couverte par une bande.
     float BandLowFrequency(size_t band) const noexcept;
     float BandHighFrequency(size_t band) const noexcept;
@@ -52,6 +58,10 @@ private:
     std::array<size_t, kAudioBandCount + 1> bandEdges_{};  // indices de bins
     std::array<float, kAudioBandCount> bandTilt_{};       // compensation +3 dB/octave
     AudioSpectrum spectrum_;
+
+    bool autoGain_ = true;
+    float envelopeDb_;  // enveloppe lente du niveau RMS (dBFS), initialisee sur la cible
+    float gainDb_ = 0.0f;
 };
 
 }  // namespace lwe

@@ -99,6 +99,10 @@ CommandLineOptions ParseCommandLine() {
             options.minimized = true;
         } else if (arg == L"--exit-after" && i + 1 < argc) {
             options.exitAfterSeconds = std::wcstod(argv[++i], nullptr);
+        } else if (arg == L"--no-autopause") {
+            options.noAutoPause = true;
+        } else if (arg == L"--audio-debug") {
+            options.audioDebug = true;
         } else if (arg == L"--wallpaper" && i + 1 < argc) {
             std::error_code ec;
             options.wallpaperOverride = std::filesystem::absolute(argv[++i], ec);
@@ -177,6 +181,8 @@ bool Application::Initialize() {
     startTickMs_ = GetTickCount64();
 
     config_.Load(dataDir / L"config.json");
+    audioCapture_.SetDebugLogging(options_.audioDebug);
+    audioCapture_.SetAutoGain(config_.Data().audio.autoGain);
     autostart::Sync(config_.Data().startWithWindows);
     limiter_.SetTargetFps(config_.Data().fpsLimit);
     uiLimiter_.SetTargetFps(kUiFps);
@@ -437,7 +443,7 @@ void Application::RebuildSurfaces() {
         targets = monitors_;
     }
 
-    watchdog_.Update(config.pause, monitors_, panel_ ? panel_->Window() : nullptr);
+    watchdog_.Update(EffectivePauseRules(), monitors_, panel_ ? panel_->Window() : nullptr);
     input_.Update();
     const FrameTiming timing = NextTiming();
     for (auto& target : targets) {
@@ -598,8 +604,18 @@ void Application::SetPauseReason(uint32_t reason, bool active) {
     UpdateTrayTooltip();
 }
 
+PauseRules Application::EffectivePauseRules() const {
+    PauseRules rules = config_.Data().pause;
+    if (options_.noAutoPause) {
+        rules.onFullscreenApp = false;
+        rules.onMaximizedApp = false;
+        rules.onBattery = false;
+    }
+    return rules;
+}
+
 void Application::WatchdogTick() {
-    const PauseRules& rules = config_.Data().pause;
+    const PauseRules rules = EffectivePauseRules();
     watchdog_.Update(rules, monitors_, panel_ ? panel_->Window() : nullptr);
     SetPauseReason(kPauseBattery, rules.onBattery && watchdog_.OnBattery());
     ApplyPauseState();
@@ -696,7 +712,8 @@ void Application::UpdateAudioCapture() {
     // Capture seulement si la reactivite est activee ET que quelque chose est dessine (fonds ou interface) :
     // en jeu plein ecran ou en pause, aucun thread audio ne tourne.
     const bool uiVisible = panel_ && panel_->IsVisible();
-    const bool wanted = config_.Data().audio.reactive && !shutDown_ && (IsRendering() || uiVisible);
+    const bool wanted =
+        config_.Data().audio.reactive && !shutDown_ && (IsRendering() || uiVisible || options_.audioDebug);
     if (wanted != audioCapture_.IsEnabled()) {
         audioCapture_.SetEnabled(wanted);
         log::Info(L"Audio : capture {}", wanted ? L"demarree" : L"arretee");
@@ -721,6 +738,12 @@ void Application::SetAudioReactive(bool reactive) {
 void Application::SetAudioSensitivity(float sensitivity) {
     config_.Data().audio.sensitivity = std::clamp(sensitivity, 0.0f, 8.0f);
     config_.MarkDirty();
+}
+
+void Application::SetAudioAutoGain(bool enabled) {
+    config_.Data().audio.autoGain = enabled;
+    config_.MarkDirty();
+    audioCapture_.SetAutoGain(enabled);
 }
 
 void Application::ApplyAudioOutput() {

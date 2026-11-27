@@ -22,6 +22,11 @@ L'exécutable : `build\vs2026\Release\WallEnginePaper.exe` (garder le dossier `a
 | `--wallpaper <fichier>` | force un fond sur tous les écrans pour cette session |
 | `--exit-after <s>` | s'arrête proprement après *s* secondes (tests) |
 | `--quit` | ferme l'instance en cours |
+| `--no-autopause` | ignore les pauses plein écran / maximisé / batterie pour cette session (mesures) |
+| `--audio-debug` | force la capture audio et résume le signal chaque seconde dans le journal |
+
+`tools/bench.sh [secondes] [fonds...]` lance chaque fond avec `--no-autopause --exit-after` et affiche la ligne
+`Session :` du journal (images, FPS, temps CPU). Mesures de référence : `docs/bench-*.txt`.
 
 ## Interface
 
@@ -123,11 +128,17 @@ tests/                         Tests (ctest)
   haut-parleurs (jamais le micro), analysé localement. Thread dédié, suit le changement de sortie (casque…).
 - **Analyse** : FFT de 2048 échantillons (fenêtre de Hann), nouvelle analyse tous les 512 échantillons
   (~94/s), 64 bandes normalisées en dB (compensation +3 dB/octave), attaque rapide, relâchement lent.
-  Au-dessus d'environ 1 kHz les bandes sont logarithmiques ; en dessous, une bande par bin de FFT. Basses ≈
-  bandes 0 à 7.
+  Au-dessus d'environ 1 kHz les bandes sont logarithmiques ; en dessous, une bande par bin de FFT. Graves :
+  bandes 0 à 9 (~20–260 Hz), médiums 10 à 48 (~260 Hz–3,9 kHz), aigus 49 à 63.
+- **Gain automatique** (activé par défaut) : une source calme est remontée jusqu'à +18 dB (enveloppe RMS lente,
+  ~4 s), jamais atténuée, gelée pendant les silences pour éviter un sursaut à la reprise.
+- **Validation** : sinusoïdes (100 Hz, 1 kHz, 8 kHz), bruit rose et kick à 120 BPM joués réellement et relus en
+  loopback avec `--audio-debug` : bonne bande, bruit rose plat (~0,5 sur les trois zones), retour à 0 en moins
+  d'une seconde de silence, latence estimée < 50 ms (fenêtre de 43 ms + sondage de 10 ms). Une capture
+  interrompue (périphérique désactivé, format de mixage modifié) est rouverte automatiquement.
 - **Utilisation** : shaders (`AudioBand(i)`, `AudioSample(x)`, `AudioBass/Mid/Treble()`, `iAudioLevel`),
   fonds web (`wallEnginePaper.on('audio', …)`), aperçu de l'interface. Réglages : *Paramètres › Audio*
-  (activation, sensibilité, spectre en direct).
+  (activation, sensibilité, gain automatique, spectre en direct).
 - **Coût** : la capture ne tourne que si quelque chose est dessiné ; en pause ou en jeu plein écran, aucun
   thread audio.
 
@@ -139,7 +150,7 @@ ctest --test-dir build/vs2026 -C Release
 ```
 
 `tests/SpectrumAnalyzerTest.cpp` : sinusoïdes pures (100 Hz à 12 kHz) dans la bonne bande, silence nul,
-retombée et niveau proportionnel au volume.
+retombée, niveau proportionnel au volume, gain automatique (source calme remontée, son fort intact, silence).
 
 ## Points d'architecture
 

@@ -86,14 +86,45 @@ int main() {
     }
 
     {
-        // Un son fort doit donner un niveau plus eleve qu'un son faible.
+        // Un son fort doit donner un niveau plus eleve qu'un son faible (gain automatique coupe).
         lwe::SpectrumAnalyzer loud(kRate);
         lwe::SpectrumAnalyzer quiet(kRate);
+        loud.SetAutoGain(false);
+        quiet.SetAutoGain(false);
         const auto loudTone = Sine(1000.0f, 0.8f, kRate / 2);
         const auto quietTone = Sine(1000.0f, 0.02f, kRate / 2);
         loud.Push(loudTone.data(), loudTone.size());
         quiet.Push(quietTone.data(), quietTone.size());
         Check(loud.Spectrum().level > quiet.Spectrum().level + 0.2f, "niveau proportionnel au volume");
+    }
+
+    {
+        // Gain automatique : une source calme (-36 dBFS) est remontee, un son fort n'est pas touche,
+        // le silence reste nul.
+        lwe::SpectrumAnalyzer withGain(kRate);
+        lwe::SpectrumAnalyzer without(kRate);
+        without.SetAutoGain(false);
+        const auto quietTone = Sine(440.0f, 0.016f, kRate * 15);
+        withGain.Push(quietTone.data(), quietTone.size());
+        without.Push(quietTone.data(), quietTone.size());
+        const float boosted = withGain.Spectrum().bands[PeakBand(withGain.Spectrum())];
+        const float raw = without.Spectrum().bands[PeakBand(without.Spectrum())];
+        char label[160];
+        std::snprintf(label, sizeof(label), "gain auto : source calme remontee (%.2f -> %.2f, %+.1f dB)", raw, boosted,
+                      withGain.GainDb());
+        Check(boosted > raw + 0.2f && withGain.GainDb() > 15.0f, label);
+
+        lwe::SpectrumAnalyzer loud(kRate);
+        const auto loudTone = Sine(440.0f, 0.5f, kRate * 5);
+        loud.Push(loudTone.data(), loudTone.size());
+        Check(loud.GainDb() == 0.0f, "gain auto : aucun gain sur un son fort");
+
+        const auto silence = std::vector<float>(kRate * 5, 0.0f);
+        withGain.Push(silence.data(), silence.size());
+        for (int i = 0; i < 100; ++i) {
+            withGain.Decay(0.88f);
+        }
+        Check(withGain.Spectrum().level < 0.01f && withGain.GainDb() > 15.0f, "gain auto : gele et sans effet en silence");
     }
 
     std::printf("\n%s (%d echec(s))\n", g_failures == 0 ? "TOUS LES TESTS PASSENT" : "DES TESTS ECHOUENT", g_failures);
