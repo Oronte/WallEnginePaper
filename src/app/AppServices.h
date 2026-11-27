@@ -1,0 +1,83 @@
+#pragma once
+
+#include <windows.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include "config/AppConfig.h"
+#include "desktop/MonitorEnumerator.h"
+
+namespace lwe {
+
+class ConfigManager;
+class RenderDevice;
+class Library;
+class IWallpaperBackend;
+struct LibraryItem;
+
+struct MonitorEntry {
+    MonitorInfo info;
+    int number = 0;      // 1, 2, ... (ecran principal = 1)
+    std::wstring label;  // "Écran 1 · LF24T35"
+};
+
+struct SurfaceStatusInfo {
+    std::string monitorId;  // kSpanMonitorId en mode etendu
+    std::wstring label;
+    RECT bounds{};
+    std::filesystem::path source;  // fond affiche (absolu ; vide = shader de secours)
+    bool paused = false;
+    bool autoPaused = false;  // recouvert par une application plein ecran
+};
+
+// Ce que l'interface peut lire et piloter. Implemente par Application : l'UI ne connait ni les
+// surfaces, ni la boucle de rendu, ni le bureau Windows.
+class IAppServices {
+public:
+    virtual ~IAppServices() = default;
+
+    virtual ConfigManager& Config() = 0;
+    virtual RenderDevice& Device() = 0;
+
+    // Bibliotheque
+    virtual const Library& GetLibrary() const = 0;
+    virtual void RescanLibrary() = 0;
+    virtual bool ImportIntoLibrary(const std::filesystem::path& file, std::wstring& error) = 0;
+    virtual void SetLibraryFolders(std::vector<std::filesystem::path> folders) = 0;
+
+    // Ecrans et fonds affiches
+    virtual std::vector<MonitorEntry> Monitors() const = 0;
+    virtual std::vector<SurfaceStatusInfo> Surfaces() const = 0;
+    virtual void ApplyWallpaper(const LibraryItem& item, const std::string& monitorId) = 0;  // "" = tous
+    virtual void SetWallpaperParameter(const LibraryItem& item, const std::string& name, const ParamValue& value) = 0;
+    virtual void ResetWallpaperParameters(const LibraryItem& item) = 0;
+    virtual void NextWallpaper() = 0;
+    // Backend actuellement affiche pour ce fond (reglages des fonds web, qui n'ont pas d'apercu), ou nullptr.
+    virtual IWallpaperBackend* LiveBackendFor(const LibraryItem& item) = 0;
+
+    // Audio des fonds video / web
+    virtual void SetVolume(float volume) = 0;
+    virtual void SetMuted(bool muted) = 0;
+
+    // Etat et performances
+    virtual bool IsManuallyPaused() const = 0;
+    virtual void SetManualPause(bool paused) = 0;
+    virtual std::wstring StatusText() const = 0;
+    virtual bool IsRendering() const = 0;
+    virtual float MeasuredFps() const = 0;
+    virtual void SetFpsLimit(uint32_t fps) = 0;
+    virtual void SetRenderScale(float scale) = 0;
+    virtual void SetLayout(LayoutMode layout) = 0;
+
+    // Demarrage, playlist, divers
+    virtual void SetStartWithWindows(bool enabled) = 0;
+    virtual void RestartPlaylistTimer() = 0;
+    virtual double MinutesUntilPlaylistChange() const = 0;
+    virtual void OpenConfigFolder() = 0;
+    virtual void OpenLogFile() = 0;
+};
+
+}  // namespace lwe

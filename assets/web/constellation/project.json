@@ -1,0 +1,14 @@
+{
+  "title": "Constellation",
+  "type": "web",
+  "file": "index.html",
+  "description": "Un réseau d'étoiles qui se relient autour du curseur. Fond web (HTML/Canvas) d'exemple : réglages, souris et audio via window.wallEnginePaper.",
+  "author": "WallEnginePaper",
+  "properties": {
+    "count": { "type": "slider", "label": "Nombre d'étoiles", "value": 220, "min": 40, "max": 600 },
+    "linkDistance": { "type": "slider", "label": "Distance des liens", "value": 140, "min": 40, "max": 300 },
+    "speed": { "type": "slider", "label": "Vitesse", "value": 1.0, "min": 0.0, "max": 3.0 },
+    "color": { "type": "color", "label": "Couleur", "value": [0.55, 0.42, 1.0] },
+    "attract": { "type": "bool", "label": "Attirées par la souris", "value": true }
+  }
+}

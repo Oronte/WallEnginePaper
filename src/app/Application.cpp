@@ -1,0 +1,1179 @@
+#include "app/Application.h"
+
+#include <mfapi.h>
+#include <shellapi.h>
+#include <wtsapi32.h>
+
+#include <algorithm>
+#include <cwchar>
+#include <format>
+#include <limits>
+#include <string>
+
+#include "core/Log.h"
+#include "core/Paths.h"
+#include "core/StringUtil.h"
+#include "desktop/MonitorEnumerator.h"
+#include "lwe_version.h"
+#include "resource.h"
+#include "system/Autostart.h"
+#include "ui/FileDialogs.h"
+#include "wallpaper/WallpaperFactory.h"
+#include "wallpaper/shader/ShaderBackend.h"
+
+namespace lwe {
+namespace {
+
+constexpr wchar_t kControlWindowClass[] = L"WEP_ControlWindow";
+constexpr wchar_t kSingleInstanceMutex[] = L"Local\\WallEnginePaper.SingleInstance";
+
+constexpr UINT kMsgSecondInstance = WM_APP + 2;
+constexpr UINT_PTR kTimerMaintenance = 1;
+constexpr UINT_PTR kTimerRebuild = 2;
+constexpr UINT_PTR kTimerWatchdog = 3;
+constexpr UINT kMaintenanceIntervalMs = 1000;
+constexpr UINT kWatchdogIntervalMs = 500;
+constexpr UINT kRebuildDebounceMs = 600;
+constexpr uint32_t kRetryWithoutSurfaceTicks = 5;
+constexpr uint32_t kUiFps = 60;
+constexpr UINT kTrayIconId = 1;
+
+// GUID_CONSOLE_DISPLAY_STATE (winnt.h), redefini ici pour ne pas dependre de initguid.h.
+constexpr GUID kConsoleDisplayState = {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
+
+enum Command : UINT {
+    kCmdOpen = 100,
+    kCmdPause,
+    kCmdMute,
+    kCmdNext,
+    kCmdSpan,
+    kCmdQuit,
+    kCmdFpsBase = 1000,
+};
+constexpr uint32_t kFpsPresets[] = {15, 30, 60, 144};
+
+int64_t QpcNow() noexcept {
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
+}
+
+std::wstring PathKey(const std::filesystem::path& path) {
+    return ToLower(path.lexically_normal().wstring());
+}
+
+std::wstring OsVersionString() {
+    using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+    RTL_OSVERSIONINFOW info{};
+    info.dwOSVersionInfoSize = sizeof(info);
+    if (HMODULE ntdll = GetModuleHandleW(L"ntdll.dll")) {
+        if (auto fn = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"))) {
+            fn(&info);
+        }
+    }
+    return std::format(L"Windows {}.{} build {}", info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber);
+}
+
+LONG WINAPI CrashFilter(EXCEPTION_POINTERS* exception) {
+    const unsigned code =
+        exception && exception->ExceptionRecord ? static_cast<unsigned>(exception->ExceptionRecord->ExceptionCode) : 0u;
+    log::Error(L"Exception non geree 0x{:08X} : restauration du bureau", code);
+    DesktopHost::EmergencyRestore();
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+}  // namespace
+
+CommandLineOptions ParseCommandLine() {
+    CommandLineOptions options;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) {
+        return options;
+    }
+    for (int i = 1; i < argc; ++i) {
+        const std::wstring_view arg = argv[i];
+        if (arg == L"--quit") {
+            options.quit = true;
+        } else if (arg == L"--minimized") {
+            options.minimized = true;
+        } else if (arg == L"--exit-after" && i + 1 < argc) {
+            options.exitAfterSeconds = std::wcstod(argv[++i], nullptr);
+        } else if (arg == L"--wallpaper" && i + 1 < argc) {
+            std::error_code ec;
+            options.wallpaperOverride = std::filesystem::absolute(argv[++i], ec);
+        }
+    }
+    LocalFree(argv);
+    return options;
+}
+
+Application::Application(HINSTANCE instance, CommandLineOptions options)
+    : instance_(instance), options_(std::move(options)) {}
+
+Application::~Application() {
+    Shutdown();
+}
+
+// =============================================================================================== //
+//  Cycle de vie
+// =============================================================================================== //
+
+int Application::Run() {
+    if (options_.quit) {
+        if (HWND existing = FindWindowW(kControlWindowClass, nullptr)) {
+            PostMessageW(existing, WM_CLOSE, 0, 0);
+            return 0;
+        }
+        return 1;
+    }
+
+    ScopedComInit com;
+    if (FAILED(com.Result())) {
+        return 1;
+    }
+
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, kSingleInstanceMutex);
+    const DWORD mutexError = GetLastError();
+    instanceMutex_.reset(mutex);
+    if (mutexError == ERROR_ALREADY_EXISTS) {
+        // Deja lance : on demande a l'instance existante d'ouvrir son interface.
+        if (HWND existing = FindWindowW(kControlWindowClass, nullptr)) {
+            DWORD processId = 0;
+            GetWindowThreadProcessId(existing, &processId);
+            AllowSetForegroundWindow(processId);
+            PostMessageW(existing, kMsgSecondInstance, options_.minimized ? 1 : 0, 0);
+        }
+        return 0;
+    }
+
+    int exitCode = 0;
+    try {
+        if (Initialize()) {
+            RunMessageLoop();
+        } else {
+            exitCode = 1;
+        }
+    } catch (const std::exception& e) {
+        log::Error(L"Erreur fatale : {}", Utf8ToWide(e.what()));
+        exitCode = 2;
+    }
+    Shutdown();  // avant la fin de vie de `com`
+    return exitCode;
+}
+
+bool Application::Initialize() {
+    const std::filesystem::path dataDir = AppDataDir();
+    log::Initialize(dataDir / L"log.txt");
+    log::Info(L"{} {} - {}", kProductName, LWE_VERSION_WSTRING, OsVersionString());
+
+    SetUnhandledExceptionFilter(CrashFilter);
+    // Le fond d'ecran ne doit jamais voler de temps CPU a l'application au premier plan.
+    SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    qpcFrequency_ = frequency.QuadPart;
+    startTickMs_ = GetTickCount64();
+
+    config_.Load(dataDir / L"config.json");
+    autostart::Sync(config_.Data().startWithWindows);
+    limiter_.SetTargetFps(config_.Data().fpsLimit);
+    uiLimiter_.SetTargetFps(kUiFps);
+    if (!limiter_.UsesHighResolutionTimer()) {
+        log::Warn(L"Timer haute resolution indisponible : cadence moins precise");
+    }
+
+    if (!CreateControlWindow()) {
+        return false;
+    }
+    taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
+    ChangeWindowMessageFilterEx(controlWindow_, taskbarCreatedMessage_, MSGFLT_ALLOW, nullptr);
+
+    const int iconSize = GetSystemMetrics(SM_CXSMICON);
+    HICON trayIcon = static_cast<HICON>(
+        LoadImageW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, iconSize, iconSize, LR_SHARED));
+    if (!tray_.Add(controlWindow_, kTrayIconId, trayIcon ? trayIcon : LoadIconW(nullptr, IDI_APPLICATION),
+                   kProductName)) {
+        log::Warn(L"Icone de notification non ajoutee (barre des taches absente ?)");
+    }
+    displayNotification_ =
+        RegisterPowerSettingNotification(controlWindow_, &kConsoleDisplayState, DEVICE_NOTIFY_WINDOW_HANDLE);
+    sessionNotificationsRegistered_ = WTSRegisterSessionNotification(controlWindow_, NOTIFY_FOR_THIS_SESSION) != FALSE;
+    SetTimer(controlWindow_, kTimerMaintenance, kMaintenanceIntervalMs, nullptr);
+    SetTimer(controlWindow_, kTimerWatchdog, kWatchdogIntervalMs, nullptr);
+
+    std::wstring error;
+    if (!device_.Create(error)) {
+        log::Error(L"Direct3D 11 : {}", error);
+        MessageBoxW(nullptr, (L"Impossible d'initialiser Direct3D 11.\n\n" + error).c_str(), kProductName,
+                    MB_ICONERROR);
+        return false;
+    }
+    // Media Foundation (fonds video, miniatures video). Mode "lite" : pas de sockets, rien que du local.
+    mediaFoundationStarted_ = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
+    if (!mediaFoundationStarted_) {
+        log::Warn(L"Media Foundation indisponible : les fonds video ne pourront pas etre lus");
+    }
+
+    library_.Scan(config_.Data().libraryFolders);
+    qpcStart_ = qpcLast_ = QpcNow();
+    RebuildSurfaces();
+    playlistAnchorMs_ = GetTickCount64();
+    fpsWindowStartMs_ = GetTickCount64();
+    if (config_.Data().playlist.enabled && config_.Data().playlist.advanceOnStartup) {
+        AdvanceWallpapers();
+    }
+    running_ = true;
+
+    if (!options_.minimized) {
+        OpenControlPanel();
+    }
+    return true;
+}
+
+bool Application::CreateControlWindow() {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = StaticWindowProc;
+    wc.hInstance = instance_;
+    wc.lpszClassName = kControlWindowClass;
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        log::Error(L"RegisterClassEx (controle) : erreur {}", GetLastError());
+        return false;
+    }
+    // Fenetre de premier niveau invisible (et non message-only) : elle doit recevoir les diffusions
+    // TaskbarCreated, WM_DISPLAYCHANGE et WM_POWERBROADCAST.
+    controlWindow_ = CreateWindowExW(WS_EX_TOOLWINDOW, kControlWindowClass, kProductName, WS_POPUP, 0, 0, 0, 0,
+                                     nullptr, nullptr, instance_, this);
+    if (!controlWindow_) {
+        log::Error(L"CreateWindowEx (controle) : erreur {}", GetLastError());
+        return false;
+    }
+    return true;
+}
+
+void Application::RunMessageLoop() {
+    MSG message{};
+    while (running_) {
+        ++loopWakeups_;
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT) {
+                running_ = false;
+                break;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        if (!running_) {
+            break;
+        }
+        if (panel_ && panel_->CloseRequested()) {
+            CloseControlPanel();
+        }
+
+        const bool uiActive = panel_ && panel_->IsVisible();
+        const bool wallpapersActive = IsRendering();
+        if (!uiActive && !wallpapersActive) {
+            // Rien a dessiner : le thread dort jusqu'au prochain message (0 % CPU).
+            MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            continue;
+        }
+        if (wallpapersActive && limiter_.IsFrameDue()) {
+            RenderFrame();
+            ++framesRendered_;
+            limiter_.OnFrameRendered();
+        }
+        if (uiActive && panel_ && uiLimiter_.IsFrameDue()) {
+            RenderControlPanel();
+            uiLimiter_.OnFrameRendered();
+        }
+
+        int64_t deadline = std::numeric_limits<int64_t>::max();
+        if (wallpapersActive) {
+            deadline = limiter_.NextDeadline();
+        }
+        if (uiActive) {
+            deadline = std::min(deadline, uiLimiter_.NextDeadline());
+        }
+        limiter_.WaitUntil(deadline);
+    }
+}
+
+void Application::Shutdown() {
+    if (shutDown_) {
+        return;
+    }
+    shutDown_ = true;
+    running_ = false;
+    LogSessionStatistics();
+
+    if (controlWindow_) {
+        KillTimer(controlWindow_, kTimerMaintenance);
+        KillTimer(controlWindow_, kTimerRebuild);
+        KillTimer(controlWindow_, kTimerWatchdog);
+        if (sessionNotificationsRegistered_) {
+            WTSUnRegisterSessionNotification(controlWindow_);
+            sessionNotificationsRegistered_ = false;
+        }
+    }
+    if (displayNotification_) {
+        UnregisterPowerSettingNotification(displayNotification_);
+        displayNotification_ = nullptr;
+    }
+
+    panel_.reset();
+    const bool hadSurfaces = !surfaces_.empty();
+    DestroySurfaces();
+    if (hadSurfaces) {
+        desktop_.RestoreDesktop();
+    }
+    tray_.Remove();
+    config_.FlushIfDirty(true);
+    device_.Release();
+    if (mediaFoundationStarted_) {
+        MFShutdown();
+        mediaFoundationStarted_ = false;
+    }
+
+    if (controlWindow_) {
+        HWND window = controlWindow_;
+        controlWindow_ = nullptr;
+        DestroyWindow(window);
+    }
+    if (startTickMs_ != 0) {
+        log::Info(L"Arret termine");
+    }
+    log::Shutdown();
+}
+
+// =============================================================================================== //
+//  Surfaces
+// =============================================================================================== //
+
+void Application::ScheduleRebuild() {
+    if (controlWindow_) {
+        SetTimer(controlWindow_, kTimerRebuild, kRebuildDebounceMs, nullptr);
+    }
+}
+
+void Application::DestroySurfaces() {
+    surfaces_.clear();
+    if (device_.IsValid()) {
+        device_.Context()->ClearState();
+        device_.Context()->Flush();
+    }
+}
+
+WallpaperRef Application::AssignedWallpaper(const MonitorInfo& monitor) const {
+    const AppConfig& config = config_.Data();
+    if (monitor.id == kSpanMonitorId) {
+        return config.spanWallpaper.Empty() ? config.defaultWallpaper : config.spanWallpaper;
+    }
+    if (const auto it = config.monitorWallpapers.find(monitor.id); it != config.monitorWallpapers.end()) {
+        return it->second;
+    }
+    return config.defaultWallpaper;
+}
+
+void Application::AssignWallpaper(const MonitorInfo& monitor, const WallpaperRef& ref) {
+    AppConfig& config = config_.Data();
+    if (monitor.id == kSpanMonitorId) {
+        config.spanWallpaper = ref;
+    } else {
+        config.monitorWallpapers[monitor.id] = ref;
+    }
+    config_.MarkDirty();
+}
+
+std::wstring Application::MonitorLabel(const MonitorInfo& monitor) const {
+    if (monitor.id == kSpanMonitorId) {
+        return L"Tous les écrans";
+    }
+    for (size_t i = 0; i < monitors_.size(); ++i) {
+        if (monitors_[i].id == monitor.id) {
+            return std::format(L"Écran {} · {}{}", i + 1, monitor.friendlyName,
+                               monitor.primary ? L" (principal)" : L"");
+        }
+    }
+    return monitor.friendlyName;
+}
+
+void Application::RebuildSurfaces() {
+    if (controlWindow_) {
+        KillTimer(controlWindow_, kTimerRebuild);
+    }
+    ticksWithoutSurface_ = 0;
+    failureRetries_.clear();
+    DestroySurfaces();
+
+    if (!device_.IsValid()) {
+        std::wstring error;
+        if (!device_.Create(error)) {
+            log::Error(L"Direct3D 11 : {}", error);
+            return;
+        }
+    }
+    if (!desktop_.Attach()) {
+        return;
+    }
+
+    monitors_ = EnumerateMonitors();
+    if (monitors_.empty()) {
+        log::Warn(L"Aucun ecran actif detecte");
+        return;
+    }
+    for (const auto& m : monitors_) {
+        log::Info(L"Ecran « {} » {}x{} @ ({}, {}), {} dpi{} - id {}", m.friendlyName, m.Width(), m.Height(),
+                  m.bounds.left, m.bounds.top, m.dpi, m.primary ? L", principal" : L"", Utf8ToWide(m.id));
+    }
+
+    const AppConfig& config = config_.Data();
+    std::vector<MonitorInfo> targets;
+    if (config.layout == LayoutMode::Span) {
+        targets.push_back(MakeSpanMonitor(monitors_));
+    } else {
+        targets = monitors_;
+    }
+
+    watchdog_.Update(config.pause, monitors_, panel_ ? panel_->Window() : nullptr);
+    input_.Update();
+    const FrameTiming timing = NextTiming();
+    for (auto& target : targets) {
+        auto surface = std::make_unique<MonitorContext>(device_, desktop_, instance_, std::move(target));
+        std::wstring error;
+        if (!surface->Create(config.renderScale, error)) {
+            log::Error(L"Surface « {} » : {}", surface->Info().friendlyName, error);
+            continue;
+        }
+
+        WallpaperDesc desc;
+        if (!options_.wallpaperOverride.empty()) {
+            desc.type = GuessWallpaperType(options_.wallpaperOverride).value_or(WallpaperType::Shader);
+            desc.source = options_.wallpaperOverride;
+        } else {
+            desc = config_.Resolve(AssignedWallpaper(surface->Info()));
+        }
+        InstallWallpaper(*surface, desc);
+
+        // Premiere image avant affichage : pas de flash noir a l'apparition.
+        surface->SetPaused(IsPaused(), watchdog_.IsAreaCovered(surface->Info().bounds));
+        surface->UpdatePointer(input_.State(), 0.0f);
+        surface->RenderFrame(timing, audio_);
+        surface->Show();
+        surfaces_.push_back(std::move(surface));
+    }
+    limiter_.Reset();
+    log::Info(L"{} surface(s) active(s)", surfaces_.size());
+}
+
+void Application::InstallWallpaper(MonitorContext& surface, const WallpaperDesc& desc) {
+    std::wstring error;
+    if (auto backend = CreateWallpaperBackend(desc.type, error)) {
+        const AudioSettings& audio = config_.Data().audio;
+        const BackendInitContext init{device_,  surface.Window(), surface.BufferWidth(), surface.BufferHeight(),
+                                      desc,     audio.volume,     audio.muted};
+        if (backend->Initialize(init, error)) {
+            log::Info(L"« {} » affiche {}", surface.Info().friendlyName,
+                      desc.source.empty() ? std::wstring(L"le shader integre") : desc.source.wstring());
+            surface.AttachBackend(std::move(backend), desc);
+            return;
+        }
+    }
+    log::Warn(L"Fond {} indisponible sur « {} », shader de secours utilise :\n{}", desc.source.wstring(),
+              surface.Info().friendlyName, error);
+
+    WallpaperDesc fallbackDesc;
+    auto fallback = std::make_unique<ShaderBackend>();
+    const BackendInitContext init{device_, surface.Window(), surface.BufferWidth(), surface.BufferHeight(),
+                                  fallbackDesc};
+    std::wstring fallbackError;
+    if (fallback->Initialize(init, fallbackError)) {
+        surface.AttachBackend(std::move(fallback), std::move(fallbackDesc));
+    } else {
+        log::Error(L"Shader de secours : {}", fallbackError);
+    }
+}
+
+// =============================================================================================== //
+//  Rendu
+// =============================================================================================== //
+
+FrameTiming Application::NextTiming() {
+    const int64_t now = QpcNow();
+    FrameTiming timing;
+    timing.seconds = static_cast<double>(now - qpcStart_) / static_cast<double>(qpcFrequency_);
+    timing.deltaSeconds =
+        std::clamp(static_cast<float>(static_cast<double>(now - qpcLast_) / static_cast<double>(qpcFrequency_)),
+                   0.0f, 0.1f);
+    timing.frameIndex = frameIndex_++;
+    timing.targetFps = static_cast<float>(config_.Data().fpsLimit);
+    qpcLast_ = now;
+    return timing;
+}
+
+void Application::RenderFrame() {
+    input_.Update();
+    const FrameTiming timing = NextTiming();
+    for (auto& surface : surfaces_) {
+        if (surface->IsPaused()) {
+            continue;
+        }
+        surface->UpdatePointer(input_.State(), timing.deltaSeconds);
+        if (surface->RenderFrame(timing, audio_) == SurfaceStatus::DeviceLost) {
+            RecoverFromDeviceLoss();
+            return;
+        }
+    }
+
+    ++fpsWindowFrames_;
+    const uint64_t now = GetTickCount64();
+    if (now - fpsWindowStartMs_ >= 1000) {
+        measuredFps_ = static_cast<float>(fpsWindowFrames_ * 1000.0 / static_cast<double>(now - fpsWindowStartMs_));
+        fpsWindowFrames_ = 0;
+        fpsWindowStartMs_ = now;
+    }
+}
+
+void Application::RecoverFromDeviceLoss() {
+    const HRESULT reason = device_.IsValid() ? device_.Device()->GetDeviceRemovedReason() : E_FAIL;
+    log::Warn(L"Peripherique GPU perdu ({}) : recreation complete", HResultToString(reason));
+    const bool hadPanel = panel_ != nullptr;
+    panel_.reset();
+    DestroySurfaces();
+    device_.Release();
+    RebuildSurfaces();
+    if (hadPanel) {
+        OpenControlPanel();
+    }
+}
+
+// =============================================================================================== //
+//  Pauses et surveillance
+// =============================================================================================== //
+
+bool Application::AnySurfaceRunning() const {
+    return std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& surface) { return !surface->IsPaused(); });
+}
+
+bool Application::IsRendering() const {
+    return !IsPaused() && AnySurfaceRunning();
+}
+
+void Application::ApplyPauseState() {
+    const bool wasRendering = IsRendering();
+    for (auto& surface : surfaces_) {
+        const bool covered = watchdog_.IsAreaCovered(surface->Info().bounds);
+        if (covered != surface->IsAutoPaused()) {
+            log::Info(L"« {} » {}", surface->Info().friendlyName,
+                      covered ? L"recouvert par une application plein ecran : pause" : L"de nouveau visible : reprise");
+        }
+        surface->SetPaused(IsPaused(), covered);
+    }
+    const bool rendering = IsRendering();
+    if (wasRendering && !rendering && config_.Data().pause.releaseGpuResources) {
+        device_.Trim();
+    }
+    if (!wasRendering && rendering) {
+        qpcLast_ = QpcNow();
+        limiter_.Reset();
+    }
+}
+
+void Application::SetPauseReason(uint32_t reason, bool active) {
+    const uint32_t previous = pauseReasons_;
+    if (active) {
+        pauseReasons_ |= reason;
+    } else {
+        pauseReasons_ &= ~reason;
+    }
+    if (previous == pauseReasons_) {
+        return;
+    }
+    ApplyPauseState();
+    log::Info(L"Raisons de pause : 0x{:X}", pauseReasons_);
+    UpdateTrayTooltip();
+}
+
+void Application::WatchdogTick() {
+    const PauseRules& rules = config_.Data().pause;
+    watchdog_.Update(rules, monitors_, panel_ ? panel_->Window() : nullptr);
+    SetPauseReason(kPauseBattery, rules.onBattery && watchdog_.OnBattery());
+    ApplyPauseState();
+}
+
+std::wstring Application::StatusText() const {
+    if (pauseReasons_ & kPauseManual) {
+        return L"En pause";
+    }
+    if (pauseReasons_ & kPauseDisplayOff) {
+        return L"En pause · écran éteint";
+    }
+    if (pauseReasons_ & kPauseSessionLocked) {
+        return L"En pause · session verrouillée";
+    }
+    if (pauseReasons_ & kPauseBattery) {
+        return L"En pause · sur batterie";
+    }
+    if (surfaces_.empty()) {
+        return L"Aucun écran actif";
+    }
+    const auto covered = std::count_if(surfaces_.begin(), surfaces_.end(),
+                                       [](const auto& surface) { return surface->IsAutoPaused(); });
+    if (covered == static_cast<std::ptrdiff_t>(surfaces_.size())) {
+        return L"En pause · application plein écran";
+    }
+    if (covered > 0) {
+        return std::format(L"Actif · {} écran(s) en pause", covered);
+    }
+    return L"Actif";
+}
+
+void Application::MaintenanceTick() {
+    config_.FlushIfDirty();
+
+    if (options_.exitAfterSeconds > 0.0 &&
+        static_cast<double>(GetTickCount64() - startTickMs_) / 1000.0 >= options_.exitAfterSeconds) {
+        log::Info(L"--exit-after atteint : arret");
+        running_ = false;
+        return;
+    }
+    if (!IsRendering() && GetTickCount64() - fpsWindowStartMs_ > 2000) {
+        measuredFps_ = 0.0f;
+    }
+
+    // L'Explorateur a pu etre redemarre (ou la couche WorkerW recreee) : nos fenetres sont alors detruites.
+    bool lost = !surfaces_.empty() && !desktop_.IsAttached();
+    for (const auto& surface : surfaces_) {
+        lost = lost || !IsWindow(surface->Window());
+    }
+    if (lost) {
+        log::Warn(L"Couche du bureau perdue : reconstruction des surfaces");
+        ScheduleRebuild();
+        return;
+    }
+    if (surfaces_.empty() && ++ticksWithoutSurface_ >= kRetryWithoutSurfaceTicks) {
+        RebuildSurfaces();
+        return;
+    }
+    for (auto& surface : surfaces_) {
+        if (!surface->IsPaused()) {
+            surface->MaintenanceTick();
+        }
+    }
+    ReplaceFailedBackends();
+    PlaylistTick();
+}
+
+void Application::ReplaceFailedBackends() {
+    for (auto& surface : surfaces_) {
+        std::wstring error;
+        if (!surface->Backend() || !surface->Backend()->HasFailed(error)) {
+            continue;
+        }
+        int& retries = failureRetries_[surface->Info().id];
+        if (retries == 0 && !surface->Desc().source.empty()) {
+            // Echec transitoire possible (demarrage du runtime, fichier en cours d'ecriture) : un nouvel essai.
+            ++retries;
+            log::Warn(L"« {} » : {} – nouvel essai", surface->Info().friendlyName, error);
+            const WallpaperDesc desc = surface->Desc();
+            InstallWallpaper(*surface, desc);
+        } else {
+            log::Error(L"« {} » : {} – remplacement par le shader de secours", surface->Info().friendlyName,
+                       error);
+            tray_.ShowNotification(kProductName, L"Ce fond n'a pas pu être lu : " + error);
+            InstallWallpaper(*surface, WallpaperDesc{});
+        }
+        surface->SetPaused(IsPaused(), surface->IsAutoPaused());
+    }
+}
+
+void Application::ApplyAudioOutput() {
+    const AudioSettings& audio = config_.Data().audio;
+    for (auto& surface : surfaces_) {
+        if (surface->Backend()) {
+            surface->Backend()->SetAudioOutput(audio.volume, audio.muted);
+        }
+    }
+}
+
+void Application::SetVolume(float volume) {
+    config_.Data().audio.volume = std::clamp(volume, 0.0f, 1.0f);
+    config_.MarkDirty();
+    ApplyAudioOutput();
+}
+
+void Application::SetMuted(bool muted) {
+    config_.Data().audio.muted = muted;
+    config_.MarkDirty();
+    ApplyAudioOutput();
+    UpdateTrayTooltip();
+}
+
+IWallpaperBackend* Application::LiveBackendFor(const LibraryItem& item) {
+    const std::wstring key = PathKey(item.source);
+    for (auto& surface : surfaces_) {
+        if (surface->Backend() && PathKey(surface->Desc().source) == key) {
+            return surface->Backend();
+        }
+    }
+    return nullptr;
+}
+
+// =============================================================================================== //
+//  Playlist / rotation
+// =============================================================================================== //
+
+std::vector<const LibraryItem*> Application::RotationCandidates() const {
+    const PlaylistSettings& playlist = config_.Data().playlist;
+    std::vector<std::string> keys;
+    if (playlist.enabled) {
+        for (const auto& path : playlist.items) {
+            keys.push_back(WallpaperSettingsKey(path));
+        }
+    }
+    std::vector<const LibraryItem*> candidates;
+    for (const auto& item : library_.Items()) {
+        if (item.supported && (keys.empty() || std::find(keys.begin(), keys.end(), item.id) != keys.end())) {
+            candidates.push_back(&item);
+        }
+    }
+    return candidates;
+}
+
+void Application::AdvanceWallpapers() {
+    const std::vector<const LibraryItem*> candidates = RotationCandidates();
+    if (candidates.empty()) {
+        log::Warn(L"Aucun fond disponible pour la rotation");
+        return;
+    }
+    options_.wallpaperOverride.clear();
+    failureRetries_.clear();
+    const bool shuffle = config_.Data().playlist.enabled && config_.Data().playlist.shuffle;
+    for (auto& surface : surfaces_) {
+        const std::wstring current = PathKey(surface->Desc().source);
+        size_t currentIndex = candidates.size();
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (PathKey(candidates[i]->source) == current) {
+                currentIndex = i;
+            }
+        }
+        size_t next = 0;
+        if (shuffle && candidates.size() > 1) {
+            std::uniform_int_distribution<size_t> pick(0, candidates.size() - 1);
+            do {
+                next = pick(random_);
+            } while (next == currentIndex);
+        } else if (currentIndex < candidates.size()) {
+            next = (currentIndex + 1) % candidates.size();
+        }
+        const WallpaperRef ref = candidates[next]->Ref();
+        AssignWallpaper(surface->Info(), ref);
+        InstallWallpaper(*surface, config_.Resolve(ref));
+    }
+    ApplyPauseState();
+}
+
+void Application::PlaylistTick() {
+    const PlaylistSettings& playlist = config_.Data().playlist;
+    const uint64_t now = GetTickCount64();
+    if (!playlist.enabled || IsPaused()) {
+        return;
+    }
+    if (now - playlistAnchorMs_ >= static_cast<uint64_t>(playlist.intervalMinutes) * 60'000) {
+        log::Info(L"Playlist : fond suivant");
+        AdvanceWallpapers();
+        playlistAnchorMs_ = now;
+    }
+}
+
+void Application::RestartPlaylistTimer() {
+    playlistAnchorMs_ = GetTickCount64();
+}
+
+double Application::MinutesUntilPlaylistChange() const {
+    const double elapsed = static_cast<double>(GetTickCount64() - playlistAnchorMs_) / 60'000.0;
+    return static_cast<double>(config_.Data().playlist.intervalMinutes) - elapsed;
+}
+
+// =============================================================================================== //
+//  IAppServices
+// =============================================================================================== //
+
+void Application::RescanLibrary() {
+    library_.Scan(config_.Data().libraryFolders);
+}
+
+bool Application::ImportIntoLibrary(const std::filesystem::path& file, std::wstring& error) {
+    std::filesystem::path imported;
+    if (!Library::Import(file, imported, error)) {
+        log::Warn(L"Import de {} impossible : {}", file.wstring(), error);
+        return false;
+    }
+    RescanLibrary();
+    return true;
+}
+
+void Application::SetLibraryFolders(std::vector<std::filesystem::path> folders) {
+    config_.Data().libraryFolders = std::move(folders);
+    config_.MarkDirty();
+    RescanLibrary();
+}
+
+std::vector<MonitorEntry> Application::Monitors() const {
+    std::vector<MonitorEntry> entries;
+    for (size_t i = 0; i < monitors_.size(); ++i) {
+        entries.push_back(MonitorEntry{monitors_[i], static_cast<int>(i + 1), MonitorLabel(monitors_[i])});
+    }
+    return entries;
+}
+
+std::vector<SurfaceStatusInfo> Application::Surfaces() const {
+    std::vector<SurfaceStatusInfo> result;
+    for (const auto& surface : surfaces_) {
+        SurfaceStatusInfo info;
+        info.monitorId = surface->Info().id;
+        info.label = MonitorLabel(surface->Info());
+        info.bounds = surface->Info().bounds;
+        info.source = surface->Desc().source;
+        info.paused = surface->IsPaused();
+        info.autoPaused = surface->IsAutoPaused();
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+void Application::ApplyWallpaper(const LibraryItem& item, const std::string& monitorId) {
+    if (!item.supported) {
+        return;
+    }
+    options_.wallpaperOverride.clear();
+    failureRetries_.clear();
+    AppConfig& config = config_.Data();
+    const WallpaperRef ref = item.Ref();
+    const bool allScreens = monitorId.empty() || config.layout == LayoutMode::Span;
+    if (allScreens) {
+        if (config.layout == LayoutMode::Span) {
+            config.spanWallpaper = ref;
+        } else {
+            config.defaultWallpaper = ref;
+            for (const auto& monitor : monitors_) {
+                config.monitorWallpapers[monitor.id] = ref;
+            }
+        }
+    } else {
+        config.monitorWallpapers[monitorId] = ref;
+    }
+    config_.MarkDirty();
+
+    const WallpaperDesc desc = config_.Resolve(ref);
+    for (auto& surface : surfaces_) {
+        if (allScreens || surface->Info().id == monitorId) {
+            InstallWallpaper(*surface, desc);
+        }
+    }
+    ApplyPauseState();
+    RestartPlaylistTimer();
+}
+
+void Application::SetWallpaperParameter(const LibraryItem& item, const std::string& name, const ParamValue& value) {
+    config_.SetWallpaperParam(item.Ref(), name, value);
+    const std::wstring key = PathKey(item.source);
+    for (auto& surface : surfaces_) {
+        if (surface->Backend() && PathKey(surface->Desc().source) == key) {
+            surface->Backend()->SetParameter(name, value);
+        }
+    }
+}
+
+void Application::ResetWallpaperParameters(const LibraryItem& item) {
+    config_.ResetWallpaperParams(item.Ref());
+    const std::wstring key = PathKey(item.source);
+    const WallpaperDesc desc = config_.Resolve(item.Ref());
+    for (auto& surface : surfaces_) {
+        if (PathKey(surface->Desc().source) == key) {
+            InstallWallpaper(*surface, desc);
+        }
+    }
+    ApplyPauseState();
+}
+
+void Application::NextWallpaper() {
+    AdvanceWallpapers();
+    RestartPlaylistTimer();
+}
+
+void Application::SetFpsLimit(uint32_t fps) {
+    fps = std::clamp<uint32_t>(fps, 1, 360);
+    if (config_.Data().fpsLimit == fps) {
+        return;
+    }
+    config_.Data().fpsLimit = fps;
+    config_.MarkDirty();
+    limiter_.SetTargetFps(fps);
+}
+
+void Application::SetRenderScale(float scale) {
+    scale = std::clamp(scale, 0.25f, 1.0f);
+    config_.Data().renderScale = scale;
+    config_.MarkDirty();
+    RebuildSurfaces();
+}
+
+void Application::SetLayout(LayoutMode layout) {
+    if (config_.Data().layout == layout) {
+        return;
+    }
+    config_.Data().layout = layout;
+    config_.MarkDirty();
+    log::Info(L"Disposition : {}", layout == LayoutMode::Span ? L"etendue sur tous les ecrans" : L"par ecran");
+    RebuildSurfaces();
+}
+
+void Application::SetStartWithWindows(bool enabled) {
+    config_.Data().startWithWindows = enabled;
+    config_.MarkDirty();
+    autostart::Sync(enabled);
+}
+
+void Application::OpenConfigFolder() {
+    OpenInShell(config_.FilePath().parent_path());
+}
+
+void Application::OpenLogFile() {
+    OpenInShell(AppDataDir() / L"log.txt");
+}
+
+// =============================================================================================== //
+//  Interface et zone de notification
+// =============================================================================================== //
+
+void Application::OpenControlPanel() {
+    if (!panel_) {
+        auto panel = std::make_unique<ControlPanel>(instance_, *this);
+        std::wstring error;
+        if (!panel->Create(error)) {
+            log::Error(L"Ouverture de l'interface impossible : {}", error);
+            return;
+        }
+        panel_ = std::move(panel);
+    }
+    panel_->Show();
+    uiLimiter_.Reset();
+    uiQpcLast_ = QpcNow();
+}
+
+void Application::CloseControlPanel() {
+    panel_.reset();
+    if (!IsRendering() && config_.Data().pause.releaseGpuResources) {
+        device_.Trim();
+    }
+    log::Info(L"Interface fermee (l'application reste dans la zone de notification)");
+    if (!trayHintShown_) {
+        trayHintShown_ = true;
+        tray_.ShowNotification(kProductName, L"WallEnginePaper continue de tourner ici. Cliquez sur l'icône "
+                                             L"pour rouvrir la bibliothèque.");
+    }
+}
+
+void Application::RenderControlPanel() {
+    const int64_t now = QpcNow();
+    const float delta = std::clamp(static_cast<float>(static_cast<double>(now - uiQpcLast_) / qpcFrequency_), 0.0f, 0.1f);
+    uiQpcLast_ = now;
+    if (!panel_->RenderFrame(delta)) {
+        RecoverFromDeviceLoss();
+    }
+}
+
+void Application::UpdateTrayTooltip() {
+    tray_.SetTooltip(std::format(L"{} – {}", kProductName, StatusText()));
+}
+
+void Application::LogSessionStatistics() const {
+    if (startTickMs_ == 0) {
+        return;
+    }
+    const auto toMs = [](const FILETIME& ft) {
+        return static_cast<double>((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10'000.0;
+    };
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    double threadMs = 0.0;
+    double processMs = 0.0;
+    if (GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user)) {
+        threadMs = toMs(kernel) + toMs(user);
+    }
+    if (GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user)) {
+        processMs = toMs(kernel) + toMs(user);
+    }
+    const double seconds = static_cast<double>(GetTickCount64() - startTickMs_) / 1000.0;
+    log::Info(L"Session : {:.1f} s, {} images ({:.1f} FPS), {} reveils de boucle, CPU thread principal {:.0f} ms, "
+              L"CPU processus {:.0f} ms",
+              seconds, framesRendered_, seconds > 0.0 ? static_cast<double>(framesRendered_) / seconds : 0.0,
+              loopWakeups_, threadMs, processMs);
+}
+
+void Application::ShowTrayMenu() {
+    const AppConfig& config = config_.Data();
+    const bool manualPause = IsManuallyPaused();
+
+    HMENU menu = CreatePopupMenu();
+    HMENU fpsMenu = CreatePopupMenu();
+    for (const uint32_t fps : kFpsPresets) {
+        AppendMenuW(fpsMenu, MF_STRING | (config.fpsLimit == fps ? MF_CHECKED : 0u), kCmdFpsBase + fps,
+                    std::format(L"{} FPS", fps).c_str());
+    }
+    AppendMenuW(menu, MF_STRING, kCmdOpen, L"Ouvrir WallEnginePaper");
+    SetMenuDefaultItem(menu, kCmdOpen, FALSE);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kCmdPause, manualPause ? L"Reprendre" : L"Pause");
+    AppendMenuW(menu, MF_STRING | (config.audio.muted ? MF_CHECKED : 0u), kCmdMute, L"Muet");
+    AppendMenuW(menu, MF_STRING, kCmdNext, L"Fond suivant");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (config.layout == LayoutMode::Span ? MF_CHECKED : 0u), kCmdSpan,
+                L"Étendre sur tous les écrans");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(fpsMenu), L"Limite d'images par seconde");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kCmdQuit, L"Quitter");
+
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    // Indispensable pour que le menu se ferme quand on clique ailleurs.
+    SetForegroundWindow(controlWindow_);
+    const UINT alignment = GetSystemMetrics(SM_MENUDROPALIGNMENT) ? TPM_RIGHTALIGN : TPM_LEFTALIGN;
+    const UINT command = static_cast<UINT>(TrackPopupMenuEx(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | alignment, cursor.x, cursor.y,
+        controlWindow_, nullptr));
+    PostMessageW(controlWindow_, WM_NULL, 0, 0);
+    DestroyMenu(menu);  // detruit aussi le sous-menu
+
+    if (command != 0) {
+        ExecuteCommand(command);
+    }
+}
+
+void Application::ExecuteCommand(UINT command) {
+    switch (command) {
+    case kCmdOpen:
+        OpenControlPanel();
+        break;
+    case kCmdPause:
+        SetManualPause(!IsManuallyPaused());
+        break;
+    case kCmdMute:
+        SetMuted(!config_.Data().audio.muted);
+        break;
+    case kCmdNext:
+        NextWallpaper();
+        break;
+    case kCmdSpan:
+        SetLayout(config_.Data().layout == LayoutMode::Span ? LayoutMode::PerMonitor : LayoutMode::Span);
+        break;
+    case kCmdQuit:
+        running_ = false;
+        break;
+    default:
+        if (command > kCmdFpsBase && command <= kCmdFpsBase + 360) {
+            SetFpsLimit(command - kCmdFpsBase);
+        }
+        break;
+    }
+}
+
+LRESULT CALLBACK Application::StaticWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+    if (auto* app = reinterpret_cast<Application*>(GetWindowLongPtrW(window, GWLP_USERDATA))) {
+        return app->WindowProc(window, message, wParam, lParam);
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+LRESULT Application::WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (taskbarCreatedMessage_ != 0 && message == taskbarCreatedMessage_) {
+        log::Info(L"Explorateur redemarre : reinstallation de l'icone et des surfaces");
+        tray_.Readd();
+        ScheduleRebuild();
+        return 0;
+    }
+
+    switch (message) {
+    case TrayIcon::kCallbackMessage:
+        switch (LOWORD(lParam)) {
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+            OpenControlPanel();
+            break;
+        case WM_CONTEXTMENU:
+            ShowTrayMenu();
+            break;
+        default:
+            break;
+        }
+        return 0;
+
+    case kMsgSecondInstance:
+        if (wParam == 0) {
+            OpenControlPanel();
+        }
+        return 0;
+
+    case WM_TIMER:
+        if (wParam == kTimerMaintenance) {
+            MaintenanceTick();
+        } else if (wParam == kTimerWatchdog) {
+            WatchdogTick();
+        } else if (wParam == kTimerRebuild) {
+            RebuildSurfaces();
+        }
+        return 0;
+
+    case WM_DISPLAYCHANGE:
+    case WM_DPICHANGED:
+        // Ajout/retrait d'ecran, changement de resolution ou d'echelle : reconstruction differee
+        // (Windows envoie souvent plusieurs messages d'affilee).
+        ScheduleRebuild();
+        return 0;
+
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_POWERSETTINGCHANGE && lParam) {
+            const auto* setting = reinterpret_cast<const POWERBROADCAST_SETTING*>(lParam);
+            if (IsEqualGUID(setting->PowerSetting, kConsoleDisplayState) && setting->DataLength >= sizeof(DWORD)) {
+                const DWORD state = *reinterpret_cast<const DWORD*>(setting->Data);  // 0 eteint, 1 allume, 2 attenue
+                SetPauseReason(kPauseDisplayOff, state == 0 && config_.Data().pause.onDisplayOff);
+            }
+        } else if (wParam == PBT_APMPOWERSTATUSCHANGE) {
+            WatchdogTick();  // branchement / debranchement du secteur
+        } else if (wParam == PBT_APMRESUMEAUTOMATIC) {
+            ScheduleRebuild();
+        }
+        return TRUE;
+
+    case WM_WTSSESSION_CHANGE:
+        if (wParam == WTS_SESSION_LOCK) {
+            SetPauseReason(kPauseSessionLocked, config_.Data().pause.onSessionLocked);
+        } else if (wParam == WTS_SESSION_UNLOCK) {
+            SetPauseReason(kPauseSessionLocked, false);
+        }
+        return 0;
+
+    case WM_QUERYENDSESSION:
+        return TRUE;
+
+    case WM_ENDSESSION:
+        if (wParam) {
+            Shutdown();
+        }
+        return 0;
+
+    case WM_CLOSE:
+        running_ = false;
+        return 0;
+
+    default:
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+}
+
+}  // namespace lwe
