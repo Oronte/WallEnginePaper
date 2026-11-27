@@ -8,6 +8,7 @@
 // @param float barHeight  0.22 0.0 0.6  "Hauteur des barres"
 // @param bool  showBars   true          "Afficher le spectre"
 // @param float glow       0.15 0.0 0.6  "Halo du curseur"
+// @param float beatPulse  0.5  0.0 1.5  "Pulsation sur le beat"
 
 float3 hsv2rgb(float3 c)
 {
@@ -19,6 +20,7 @@ void mainImage(out float4 fragColor, in float2 fragCoord)
 {
     float2 uv = fragCoord / iResolution.xy;
     float2 p = (fragCoord - 0.5 * iResolution.xy) / iResolution.y + iParallax * 0.04;
+    p *= 1.0 - 0.06 * beatPulse * iBeat;   // leger zoom a chaque beat
     float t = iTime * 0.3;
 
     float v = sin(p.x * 3.0 + t)
@@ -26,7 +28,8 @@ void mainImage(out float4 fragColor, in float2 fragCoord)
             + sin((p.x + p.y) * 3.0 + t * 0.7)
             + sin(length(p * 4.0 + float2(sin(t), cos(t))) * 2.0);
 
-    float3 color = hsv2rgb(float3(v * 0.12 + t * 0.05, saturation, 0.30 + 0.25 * iAudioLevel));
+    float3 color = hsv2rgb(float3(v * 0.12 + t * 0.05 + 0.04 * iTreble, saturation,
+                                  0.28 + 0.2 * iAudioLevel + 0.18 * iBass + 0.25 * beatPulse * iBeat));
 
     if (showBars)
     {

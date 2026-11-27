@@ -62,10 +62,11 @@ L'exécutable : `build\vs2026\Release\WallEnginePaper.exe` (garder le dossier `a
 
   ```js
   const wep = window.wallEnginePaper;   // mouse {x, y, nx, ny, inside}, audio (Float32Array 64), audioLevel,
-                                        // params, volume, muted, paused
+                                        // audioBands {bass, mid, treble}, bpm, beat, params, volume, muted, paused
   wep.on('params', p => { /* réglages du project.json */ });
   wep.on('mouse',  m => { /* ... */ });
-  wep.on('audio',  bands => { /* spectre 64 bandes */ });
+  wep.on('audio',  bands => { /* spectre 64 bandes ; wep.audioBands.bass… à jour */ });
+  wep.on('beat',   e => { /* e.bpm, e.count, e.time (performance.now()) */ });
   wep.on('pause',  paused => { /* ... */ });
   ```
 
@@ -102,7 +103,8 @@ src/
   main.cpp
   app/AppServices.h            Interface lue/pilotée par l'UI (découplage UI ⇄ moteur)
   app/Application.*            Boucle cadencée (fonds + UI), surfaces, pauses, playlist, tray
-  audio/                       AudioCapture (WASAPI loopback), SpectrumAnalyzer (FFT 64 bandes)
+  audio/                       AudioCapture (WASAPI loopback), SpectrumAnalyzer (FFT 64 bandes, zones),
+                               BeatDetector (beats, tempo)
   core/                        Log, chemins (%APPDATA%\WallEnginePaper), UTF-8/16, RAII Win32
   config/                      AppConfig + JSON, ConfigManager (sauvegarde atomique différée)
   desktop/                     DesktopHost (WorkerW classique + 24H2), écrans, MonitorContext (surface)
@@ -136,9 +138,20 @@ tests/                         Tests (ctest)
   loopback avec `--audio-debug` : bonne bande, bruit rose plat (~0,5 sur les trois zones), retour à 0 en moins
   d'une seconde de silence, latence estimée < 50 ms (fenêtre de 43 ms + sondage de 10 ms). Une capture
   interrompue (périphérique désactivé, format de mixage modifié) est rouverte automatiquement.
-- **Utilisation** : shaders (`AudioBand(i)`, `AudioSample(x)`, `AudioBass/Mid/Treble()`, `iAudioLevel`),
-  fonds web (`wallEnginePaper.on('audio', …)`), aperçu de l'interface. Réglages : *Paramètres › Audio*
-  (activation, sensibilité, gain automatique, spectre en direct).
+- **Graves / médiums / aigus** : trois zones par fréquence (~20–250 Hz, 250 Hz–4 kHz, 4–16 kHz), mélange du
+  maximum et de la moyenne des bandes, lissées par une attaque et un relâchement réglables (10 ms / 200 ms).
+- **Beat et tempo** : flux spectral « SuperFlux » (hausse du spectre en dB par rapport au maximum des bins voisins
+  de l'analyse précédente, graves pondérés ×1, médiums ×0,4, aigus ×0,1) ; un beat est un pic local au-dessus d'un
+  seuil adaptatif (moyenne + 1,5 σ sur 1,5 s, 2 × la moyenne, 30 % des attaques fortes des 3 dernières secondes,
+  divisés par la sensibilité). Tempo : autocorrélation de la nouveauté sur 6 s, 2 fois par seconde, pondérée
+  autour de 120 BPM (évite les erreurs d'octave), interpolation parabolique, changement confirmé deux fois ;
+  oublié après 5 s sans beat. L'intensité vaut 1 au beat et décroît sur un quart de période.
+  Mesuré en loopback réel : kick à 120 BPM → 119,8 BPM, kick à 128 BPM → 127,9 BPM (en ~3 s), bruit rose → aucun beat.
+- **Utilisation** : shaders (`iBass`, `iMid`, `iTreble`, `iBeat`, `iBpm`, `iBeatTime`, `iBeatCount`,
+  `AudioBand(i)`, `AudioSample(x)`, `iAudioLevel`), fonds web (`wep.audioBands`, `wep.bpm`,
+  `wep.on('beat', …)`, `wep.on('audio', …)`), aperçu de l'interface. Réglages : *Paramètres › Audio*
+  (activation, sensibilité, gain automatique, sensibilité du beat, attaque / relâchement, spectre en direct,
+  vumètre graves / médiums / aigus avec pastille de beat et tempo).
 - **Coût** : la capture ne tourne que si quelque chose est dessiné ; en pause ou en jeu plein écran, aucun
   thread audio.
 
@@ -150,7 +163,11 @@ ctest --test-dir build/vs2026 -C Release
 ```
 
 `tests/SpectrumAnalyzerTest.cpp` : sinusoïdes pures (100 Hz à 12 kHz) dans la bonne bande, silence nul,
-retombée, niveau proportionnel au volume, gain automatique (source calme remontée, son fort intact, silence).
+retombée, niveau proportionnel au volume, gain automatique (source calme remontée, son fort intact, silence),
+zones graves / médiums / aigus, relâchement réglable.
+`tests/BeatDetectorTest.cpp` : clics à 90/120/128/140 BPM et kick + charleston à 100/120/128 BPM (tempo à ±2 BPM,
+nombre de beats, charleston ignoré), décroissance de l'intensité, silence, bruit rose et son tenu sans beat, oubli
+du tempo, sensibilité. `LWE_BEAT_TRACE=1` affiche la nouveauté et le seuil image par image.
 
 ## Points d'architecture
 
@@ -187,8 +204,17 @@ void mainImage(out float4 fragColor, in float2 fragCoord)
 ```
 
 Uniformes : `iResolution`, `iTime`, `iTimeDelta`, `iFrame`, `iFrameRate`, `iDate`, `iMouse`, `iMouseNorm`,
-`iParallax`, `iMouseInside`, `iAudioLevel`, `iAudioSpectrum[16]` (via `AudioBand(i)`, `AudioSample(x)`,
-`AudioBass/Mid/Treble()`). Chaque `@param` (16 max) devient une macro et un réglage dans l'interface. Alias GLSL
+`iParallax`, `iMouseInside`, `iAudioLevel`, `iAudioSpectrum[16]` (via `AudioBand(i)`, `AudioSample(x)`).
+
+| Uniforme audio | Contenu |
+|---|---|
+| `iBass`, `iMid`, `iTreble` | zones ~20–250 Hz, 250 Hz–4 kHz, 4–16 kHz, lissées, [0, 1] (aussi `AudioBass()`…) |
+| `iBeat` | 1 au beat, décroît jusqu'au suivant |
+| `iBpm` | tempo estimé (0 si inconnu) |
+| `iBeatTime` | secondes depuis le dernier beat |
+| `iBeatCount` | nombre de beats depuis l'affichage du fond |
+
+ Chaque `@param` (16 max) devient une macro et un réglage dans l'interface. Alias GLSL
 fournis (`vec2/3/4`, `fract`, `mix`, `mod`…). Sauvegarder le fichier le recompile à chaud ; une erreur garde
 la version précédente et part dans le journal.
 

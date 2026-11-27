@@ -37,10 +37,18 @@ struct ShaderConstants {
     float iBrightness;
     float iAudioSensitivity;
     float iMouseInside;
+    float iBass;
+    float iMid;
+    float iTreble;
+    float iBeat;
+    float iBpm;
+    float iBeatTime;
+    float iBeatCount;
+    float iLweReserved0;
     float iAudioSpectrum[kAudioBandCount];
     float iParams[ShaderBackend::kMaxShaderParams][4];
 };
-static_assert(sizeof(ShaderConstants) == 624, "ShaderConstants doit correspondre au cbuffer HLSL");
+static_assert(sizeof(ShaderConstants) == 656, "ShaderConstants doit correspondre au cbuffer HLSL");
 static_assert(sizeof(ShaderConstants) % 16 == 0, "Un constant buffer doit etre un multiple de 16 octets");
 
 constexpr char kPreludeCore[] = R"hlsl(
@@ -62,6 +70,14 @@ cbuffer LweGlobals : register(b0)
     float  iBrightness;
     float  iAudioSensitivity;
     float  iMouseInside;
+    float  iBass;        // graves ~20-250 Hz, lisses [0, 1]
+    float  iMid;         // mediums ~250 Hz-4 kHz
+    float  iTreble;      // aigus ~4-16 kHz
+    float  iBeat;        // 1 au beat, decroit jusqu'au suivant
+    float  iBpm;         // tempo estime (0 = inconnu)
+    float  iBeatTime;    // secondes depuis le dernier beat
+    float  iBeatCount;   // nombre de beats depuis le lancement du fond
+    float  iLweReserved0;
     float4 iAudioSpectrum[16];
     float4 iParams[16];
 };
@@ -87,10 +103,10 @@ float AudioRange(int first, int last)
     return sum / (float)(last - first + 1);
 }
 
-// ~20-260 Hz, ~260 Hz-3,9 kHz, ~3,9-16 kHz (a 48 kHz).
-float AudioBass()   { return AudioRange(0, 9); }
-float AudioMid()    { return AudioRange(10, 48); }
-float AudioTreble() { return AudioRange(49, 63); }
+// Zones de frequences (~20-250 Hz, 250 Hz-4 kHz, 4-16 kHz) calculees par l'analyseur, lissees.
+float AudioBass()   { return iBass; }
+float AudioMid()    { return iMid; }
+float AudioTreble() { return iTreble; }
 
 float3 LweHueShift(float3 color, float degrees)
 {
@@ -619,6 +635,17 @@ bool ShaderBackend::Render(ID3D11RenderTargetView* target, const FrameContext& f
     c.iMouseInside = mouse.inside ? 1.0f : 0.0f;
 
     if (frame.audio) {
+        const AudioSpectrum& audio = *frame.audio;
+        c.iBass = std::min(1.0f, audio.bass * audioSensitivity_);
+        c.iMid = std::min(1.0f, audio.mid * audioSensitivity_);
+        c.iTreble = std::min(1.0f, audio.treble * audioSensitivity_);
+        c.iBeat = audio.beat;
+        c.iBpm = audio.bpm;
+        c.iBeatTime = std::min(audio.beatTime, 1000.0f);
+        if (beatCountBase_ == UINT32_MAX) {
+            beatCountBase_ = audio.beatCount;
+        }
+        c.iBeatCount = static_cast<float>(audio.beatCount - beatCountBase_);
         c.iAudioLevel = std::min(1.0f, frame.audio->level * audioSensitivity_);
         for (size_t i = 0; i < kAudioBandCount; ++i) {
             c.iAudioSpectrum[i] = std::min(1.0f, frame.audio->bands[i] * audioSensitivity_);

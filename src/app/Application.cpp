@@ -183,6 +183,8 @@ bool Application::Initialize() {
     config_.Load(dataDir / L"config.json");
     audioCapture_.SetDebugLogging(options_.audioDebug);
     audioCapture_.SetAutoGain(config_.Data().audio.autoGain);
+    audioCapture_.SetBeatSensitivity(config_.Data().audio.beatSensitivity);
+    audioCapture_.SetSmoothing(config_.Data().audio.attackMs, config_.Data().audio.releaseMs);
     autostart::Sync(config_.Data().startWithWindows);
     limiter_.SetTargetFps(config_.Data().fpsLimit);
     uiLimiter_.SetTargetFps(kUiFps);
@@ -727,6 +729,9 @@ void Application::CurrentAudio(AudioSpectrum& out) const {
         band = std::min(1.0f, band * sensitivity);
     }
     out.level = std::min(1.0f, out.level * sensitivity);
+    out.bass = std::min(1.0f, out.bass * sensitivity);
+    out.mid = std::min(1.0f, out.mid * sensitivity);
+    out.treble = std::min(1.0f, out.treble * sensitivity);
 }
 
 void Application::SetAudioReactive(bool reactive) {
@@ -744,6 +749,20 @@ void Application::SetAudioAutoGain(bool enabled) {
     config_.Data().audio.autoGain = enabled;
     config_.MarkDirty();
     audioCapture_.SetAutoGain(enabled);
+}
+
+void Application::SetAudioBeatSensitivity(float sensitivity) {
+    config_.Data().audio.beatSensitivity = std::clamp(sensitivity, 0.25f, 2.0f);
+    config_.MarkDirty();
+    audioCapture_.SetBeatSensitivity(config_.Data().audio.beatSensitivity);
+}
+
+void Application::SetAudioSmoothing(float attackMs, float releaseMs) {
+    AudioSettings& audio = config_.Data().audio;
+    audio.attackMs = std::clamp(attackMs, 0.0f, 500.0f);
+    audio.releaseMs = std::clamp(releaseMs, 10.0f, 3000.0f);
+    config_.MarkDirty();
+    audioCapture_.SetSmoothing(audio.attackMs, audio.releaseMs);
 }
 
 void Application::ApplyAudioOutput() {

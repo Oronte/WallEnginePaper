@@ -33,6 +33,12 @@ public:
     void SetDebugLogging(bool enabled) noexcept { debug_ = enabled; }
     // Gain automatique des sources calmes (voir SpectrumAnalyzer::SetAutoGain).
     void SetAutoGain(bool enabled) noexcept { autoGain_ = enabled; }
+    // Analyse rythmique : sensibilite du beat (0,25 a 2), lissage des graves / mediums / aigus (ms).
+    void SetBeatSensitivity(float sensitivity) noexcept { beatSensitivity_ = sensitivity; }
+    void SetSmoothing(float attackMs, float releaseMs) noexcept {
+        attackMs_ = attackMs;
+        releaseMs_ = releaseMs;
+    }
 
 private:
     void ThreadMain();
@@ -42,6 +48,9 @@ private:
     std::atomic<bool> capturing_{false};
     std::atomic<bool> debug_{false};
     std::atomic<bool> autoGain_{true};
+    std::atomic<float> beatSensitivity_{1.0f};
+    std::atomic<float> attackMs_{10.0f};
+    std::atomic<float> releaseMs_{200.0f};
 
     mutable std::mutex mutex_;
     AudioSpectrum spectrum_;

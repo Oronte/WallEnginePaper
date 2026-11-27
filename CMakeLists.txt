@@ -38,6 +38,8 @@ set(LWE_SOURCES
     src/audio/AudioCapture.cpp
     src/audio/SpectrumAnalyzer.h
     src/audio/SpectrumAnalyzer.cpp
+    src/audio/BeatDetector.h
+    src/audio/BeatDetector.cpp
 
     src/core/Log.h
     src/core/Log.cpp
@@ -166,12 +168,18 @@ set_target_properties(WallEnginePaper PROPERTIES
 
 # --- Tests (ctest) -------------------------------------------------------------------------
 enable_testing()
-add_executable(WallEnginePaperTests tests/SpectrumAnalyzerTest.cpp src/audio/SpectrumAnalyzer.cpp)
-target_include_directories(WallEnginePaperTests PRIVATE src)
+add_executable(WallEnginePaperTests
+    tests/TestMain.cpp
+    tests/TestUtil.h
+    tests/SpectrumAnalyzerTest.cpp
+    tests/BeatDetectorTest.cpp
+    src/audio/SpectrumAnalyzer.cpp
+    src/audio/BeatDetector.cpp)
+target_include_directories(WallEnginePaperTests PRIVATE src tests)
 target_compile_definitions(WallEnginePaperTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
 target_compile_options(WallEnginePaperTests PRIVATE /W4 /permissive- /utf-8 /EHsc)
 target_link_libraries(WallEnginePaperTests PRIVATE lwe::json)
-add_test(NAME SpectrumAnalyzer COMMAND WallEnginePaperTests)
+add_test(NAME WallEnginePaperTests COMMAND WallEnginePaperTests)
 
 install(TARGETS WallEnginePaper RUNTIME DESTINATION .)
 install(DIRECTORY assets DESTINATION .)

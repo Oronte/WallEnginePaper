@@ -18,10 +18,18 @@ class RenderDevice;
 
 inline constexpr size_t kAudioBandCount = 64;
 
-// Spectre audio normalise [0, 1] (64 bandes logarithmiques) + niveau global.
+// Spectre audio normalise [0, 1] (64 bandes logarithmiques) + niveau global + analyse rythmique.
 struct AudioSpectrum {
     std::array<float, kAudioBandCount> bands{};
     float level = 0.0f;
+    // Zones de frequences (~20-250 Hz, 250 Hz-4 kHz, 4-16 kHz) lissees (attaque / relachement reglables).
+    float bass = 0.0f;
+    float mid = 0.0f;
+    float treble = 0.0f;
+    float beat = 0.0f;       // 1 au beat, decroit jusqu'au suivant
+    float bpm = 0.0f;        // tempo estime (0 = inconnu)
+    float beatTime = 1e6f;   // secondes depuis le dernier beat
+    uint32_t beatCount = 0;  // incremente a chaque beat (detection de front)
 };
 
 // Etat du pointeur vu depuis une surface donnee (calcule par MonitorContext a partir de InputForwarder).

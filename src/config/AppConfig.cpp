@@ -193,6 +193,10 @@ void AppConfig::Sanitize() {
         audio.sensitivity = 1.0f;
     }
     audio.sensitivity = std::clamp(audio.sensitivity, 0.0f, 8.0f);
+    const auto finiteOr = [](float value, float fallback) { return std::isfinite(value) ? value : fallback; };
+    audio.beatSensitivity = std::clamp(finiteOr(audio.beatSensitivity, 1.0f), 0.25f, 2.0f);
+    audio.attackMs = std::clamp(finiteOr(audio.attackMs, 10.0f), 0.0f, 500.0f);
+    audio.releaseMs = std::clamp(finiteOr(audio.releaseMs, 200.0f), 10.0f, 3000.0f);
     playlist.intervalMinutes = std::clamp<uint32_t>(playlist.intervalMinutes, 1, 24 * 60);
     if (defaultWallpaper.Empty()) {
         defaultWallpaper = AppConfig{}.defaultWallpaper;
@@ -242,6 +246,9 @@ std::string SerializeConfig(const AppConfig& config) {
         {"reactive", config.audio.reactive},
         {"sensitivity", config.audio.sensitivity},
         {"autoGain", config.audio.autoGain},
+        {"beatSensitivity", config.audio.beatSensitivity},
+        {"attackMs", config.audio.attackMs},
+        {"releaseMs", config.audio.releaseMs},
     };
     root["playlist"] = {
         {"enabled", config.playlist.enabled},
@@ -319,6 +326,9 @@ bool DeserializeConfig(std::string_view text, AppConfig& out, std::string& error
         ReadValue(*it, "reactive", config.audio.reactive);
         ReadValue(*it, "sensitivity", config.audio.sensitivity);
         ReadValue(*it, "autoGain", config.audio.autoGain);
+        ReadValue(*it, "beatSensitivity", config.audio.beatSensitivity);
+        ReadValue(*it, "attackMs", config.audio.attackMs);
+        ReadValue(*it, "releaseMs", config.audio.releaseMs);
     }
     if (const auto it = root.find("playlist"); it != root.end() && it->is_object()) {
         ReadValue(*it, "enabled", config.playlist.enabled);

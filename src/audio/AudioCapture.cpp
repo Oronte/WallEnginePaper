@@ -187,6 +187,10 @@ void AudioCapture::ThreadMain() {
     std::unique_ptr<CaptureSession> session;
     std::vector<float> mono;
     ULONGLONG lastDeviceCheck = GetTickCount64();
+    LARGE_INTEGER qpcFrequency{};
+    QueryPerformanceFrequency(&qpcFrequency);
+    LARGE_INTEGER lastLoop{};
+    QueryPerformanceCounter(&lastLoop);
     std::wstring lastError;
     const auto publish = [&](const AudioSpectrum& spectrum) {
         std::scoped_lock lock(mutex_);
@@ -204,6 +208,7 @@ void AudioCapture::ThreadMain() {
         float maxBass = 0.0f, maxMid = 0.0f, maxTreble = 0.0f;
         size_t peakBand = 0;
         float peakBandValue = 0.0f;
+        uint32_t beatCountStart = 0;
     } stats;
     stats.start = GetTickCount64();
     const auto range = [](const AudioSpectrum& s, size_t first, size_t last) {
@@ -229,12 +234,13 @@ void AudioCapture::ThreadMain() {
         const ULONGLONG now = GetTickCount64();
         if (now - stats.start >= 1000) {
             log::Info(L"Audio debug : {} ech., crete {:.3f}, niveau moy {:.2f} max {:.2f}, graves {:.2f}, medium {:.2f}, "
-                      L"aigus {:.2f}, bande max {} ({:.2f}), gain auto {:+.1f} dB",
+                      L"aigus {:.2f}, bande max {} ({:.2f}), gain auto {:+.1f} dB, {} beat(s), tempo {:.1f} BPM",
                       stats.frames, stats.peakSample, stats.publishes ? stats.sumLevel / stats.publishes : 0.0,
                       stats.maxLevel, stats.maxBass, stats.maxMid, stats.maxTreble, stats.peakBand,
-                      stats.peakBandValue, gainDb);
+                      stats.peakBandValue, gainDb, s.beatCount - stats.beatCountStart, s.bpm);
             stats = DebugStats{};
             stats.start = now;
+            stats.beatCountStart = s.beatCount;
         }
     };
 
@@ -268,6 +274,14 @@ void AudioCapture::ThreadMain() {
         }
 
         session->analyzer->SetAutoGain(autoGain_);
+        session->analyzer->SetBeatSensitivity(beatSensitivity_);
+        session->analyzer->SetSmoothing(attackMs_, releaseMs_);
+        LARGE_INTEGER loopTime{};
+        QueryPerformanceCounter(&loopTime);
+        const float elapsed = std::clamp(static_cast<float>(static_cast<double>(loopTime.QuadPart - lastLoop.QuadPart) /
+                                                            static_cast<double>(qpcFrequency.QuadPart)),
+                                         0.0f, 0.5f);
+        lastLoop = loopTime;
         bool received = false;
         bool failed = false;
         UINT32 packet = 0;
@@ -323,7 +337,7 @@ void AudioCapture::ThreadMain() {
         }
         // Rien ne joue : en loopback, Windows n'envoie alors aucun paquet.
         if (!received) {
-            session->analyzer->Decay(kSilenceDecay);
+            session->analyzer->Decay(kSilenceDecay, elapsed);
         }
         publish(session->analyzer->Spectrum());
         if (debug_) {

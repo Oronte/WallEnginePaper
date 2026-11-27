@@ -1368,6 +1368,57 @@ void ControlPanelViews::DrawSettings() {
         drawList->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barWidth - 2.0f, origin.y + height - 4 * s), ToU32(barColor), 2.0f);
     }
     ImGui::Dummy(ImVec2(width, height));
+
+    // Vumetre graves / mediums / aigus + indicateur de beat et tempo.
+    {
+        const float meterHeight = 12.0f * s;
+        const float labelWidth = 78.0f * s;
+        const float meterWidth = std::max(80.0f * s, width - labelWidth - 110.0f * s);
+        const ImVec2 meterOrigin = ImGui::GetCursorScreenPos();
+        const char* names[3] = {"Graves", "Médiums", "Aigus"};
+        const float values[3] = {spectrum.bass, spectrum.mid, spectrum.treble};
+        const ImVec4 colors[3] = {color::kAccent, ImVec4((color::kAccent.x + color::kAccent2.x) * 0.5f,
+                                                         (color::kAccent.y + color::kAccent2.y) * 0.5f,
+                                                         (color::kAccent.z + color::kAccent2.z) * 0.5f, 1.0f),
+                                  color::kAccent2};
+        for (int i = 0; i < 3; ++i) {
+            const float y = meterOrigin.y + static_cast<float>(i) * (meterHeight + 6.0f * s);
+            drawList->AddText(ImVec2(meterOrigin.x, y - 2.0f * s), ToU32(color::kTextDim), names[i]);
+            const ImVec2 barMin(meterOrigin.x + labelWidth, y);
+            drawList->AddRectFilled(barMin, barMin + ImVec2(meterWidth, meterHeight), ToU32(color::kPanel), 4 * s);
+            drawList->AddRectFilled(barMin,
+                                    barMin + ImVec2(meterWidth * std::clamp(values[i], 0.0f, 1.0f), meterHeight),
+                                    ToU32(colors[i]), 4 * s);
+        }
+        // Pastille qui s'allume a chaque beat, tempo a cote.
+        const float blockHeight = 3.0f * meterHeight + 12.0f * s;
+        const ImVec2 dot(meterOrigin.x + labelWidth + meterWidth + 28.0f * s, meterOrigin.y + blockHeight * 0.5f);
+        const float pulse = std::clamp(spectrum.beat, 0.0f, 1.0f);
+        drawList->AddCircleFilled(dot, 14.0f * s, ToU32(color::kPanel));
+        drawList->AddCircleFilled(dot, (6.0f + 8.0f * pulse) * s,
+                                  ToU32(ImVec4(color::kAccent2.x, color::kAccent2.y, color::kAccent2.z, 0.25f + 0.75f * pulse)));
+        const std::string tempo = spectrum.bpm > 0.0f ? std::format("{:.0f} BPM", spectrum.bpm) : std::string("— BPM");
+        drawList->AddText(ImVec2(dot.x + 22.0f * s, dot.y - ImGui::GetTextLineHeight() * 0.5f), ToU32(color::kText),
+                          tempo.c_str());
+        ImGui::Dummy(ImVec2(width, blockHeight));
+    }
+
+    float beatSensitivity = config.audio.beatSensitivity;
+    ImGui::SetNextItemWidth(340 * s);
+    if (ImGui::SliderFloat("Sensibilité du beat##beat_sensitivity", &beatSensitivity, 0.25f, 2.0f, "%.2f")) {
+        services_.SetAudioBeatSensitivity(beatSensitivity);
+    }
+    float attack = config.audio.attackMs;
+    float release = config.audio.releaseMs;
+    ImGui::SetNextItemWidth(165 * s);
+    bool smoothingChanged = ImGui::SliderFloat("##audio_attack", &attack, 0.0f, 200.0f, "Attaque %.0f ms");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(165 * s);
+    smoothingChanged |= ImGui::SliderFloat("Lissage des zones##audio_release", &release, 20.0f, 1500.0f,
+                                           "Relâchement %.0f ms", ImGuiSliderFlags_Logarithmic);
+    if (smoothingChanged) {
+        services_.SetAudioSmoothing(attack, release);
+    }
     const std::wstring device = services_.AudioDeviceName();
     ImGui::TextDisabled("%s", device.empty() ? (reactive ? "Aucune sortie audio capturée pour l'instant"
                                                          : "Capture désactivée")

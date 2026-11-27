@@ -66,6 +66,8 @@ public:
     void SetAudioReactive(bool reactive) override;
     void SetAudioSensitivity(float sensitivity) override;
     void SetAudioAutoGain(bool enabled) override;
+    void SetAudioBeatSensitivity(float sensitivity) override;
+    void SetAudioSmoothing(float attackMs, float releaseMs) override;
     void CurrentAudio(AudioSpectrum& out) const override;
     std::wstring AudioDeviceName() const override { return audioCapture_.DeviceName(); }
     bool IsManuallyPaused() const override { return (pauseReasons_ & kPauseManual) != 0; }

@@ -6,18 +6,12 @@
 #include <numbers>
 #include <vector>
 
+#include "TestUtil.h"
 #include "audio/SpectrumAnalyzer.h"
 
 namespace {
 
-int g_failures = 0;
-
-void Check(bool condition, const char* what) {
-    std::printf("[%s] %s\n", condition ? "OK" : "ECHEC", what);
-    if (!condition) {
-        ++g_failures;
-    }
-}
+using lwe::test::Check;
 
 constexpr uint32_t kRate = 48000;
 
@@ -41,7 +35,8 @@ size_t ExpectedBand(float frequency) {
 
 }  // namespace
 
-int main() {
+void RunSpectrumAnalyzerTests() {
+    lwe::test::Section("SpectrumAnalyzer");
     {
         lwe::SpectrumAnalyzer analyzer(kRate);
         const auto silence = std::vector<float>(kRate, 0.0f);
@@ -127,6 +122,41 @@ int main() {
         Check(withGain.Spectrum().level < 0.01f && withGain.GainDb() > 15.0f, "gain auto : gele et sans effet en silence");
     }
 
-    std::printf("\n%s (%d echec(s))\n", g_failures == 0 ? "TOUS LES TESTS PASSENT" : "DES TESTS ECHOUENT", g_failures);
-    return g_failures == 0 ? 0 : 1;
+    {
+        // Zones de frequences : chaque ton allume sa zone, pas les autres.
+        struct Case {
+            float frequency;
+            int zone;
+        };
+        for (const Case c : {Case{100.0f, 0}, Case{1000.0f, 1}, Case{8000.0f, 2}}) {
+            lwe::SpectrumAnalyzer analyzer(kRate);
+            const auto tone = Sine(c.frequency, 0.3f, kRate);
+            analyzer.Push(tone.data(), tone.size());
+            const auto& s = analyzer.Spectrum();
+            const float zones[3] = {s.bass, s.mid, s.treble};
+            const float others = std::max(zones[(c.zone + 1) % 3], zones[(c.zone + 2) % 3]);
+            char label[160];
+            std::snprintf(label, sizeof(label), "zones : %.0f Hz -> graves %.2f, mediums %.2f, aigus %.2f", c.frequency,
+                          s.bass, s.mid, s.treble);
+            Check(zones[c.zone] > 0.4f && others < zones[c.zone] * 0.35f, label);
+        }
+    }
+
+    {
+        // Attaque / relachement : avec un relachement long, les graves retombent plus lentement.
+        lwe::SpectrumAnalyzer fast(kRate);
+        lwe::SpectrumAnalyzer slow(kRate);
+        fast.SetSmoothing(5.0f, 50.0f);
+        slow.SetSmoothing(5.0f, 800.0f);
+        const auto tone = Sine(80.0f, 0.4f, kRate / 2);
+        fast.Push(tone.data(), tone.size());
+        slow.Push(tone.data(), tone.size());
+        const auto silence = std::vector<float>(kRate / 5, 0.0f);
+        fast.Push(silence.data(), silence.size());
+        slow.Push(silence.data(), silence.size());
+        char label[160];
+        std::snprintf(label, sizeof(label), "relachement reglable : graves apres 200 ms de silence %.2f (50 ms) < %.2f (800 ms)",
+                      fast.Spectrum().bass, slow.Spectrum().bass);
+        Check(fast.Spectrum().bass < 0.1f && slow.Spectrum().bass > 0.3f, label);
+    }
 }

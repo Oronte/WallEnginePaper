@@ -21,8 +21,9 @@ namespace lwe {
 // navigateur sont desactives.
 //
 // API exposee a la page : window.wallEnginePaper
-//   .mouse { x, y, nx, ny, inside }   .audio (Float32Array(64))   .params {...}   .volume  .paused
-//   .on('mouse' | 'audio' | 'params' | 'pause', callback)
+//   .mouse { x, y, nx, ny, inside }   .audio (Float32Array(64))   .audioLevel   .audioBands { bass, mid, treble }
+//   .bpm   .beat   .params {...}   .volume  .paused
+//   .on('mouse' | 'audio' | 'beat' | 'params' | 'pause', callback)
 // Les icones du bureau captant la souris, les mouvements et clics sont aussi rejoues dans la page sous
 // forme d'evenements pointermove / mousemove / mousedown / mouseup / click.
 //
@@ -88,6 +89,7 @@ private:
     float lastY_ = -1.0f;
     bool lastDown_ = false;
     bool lastInside_ = false;
+    uint32_t lastBeatCount_ = UINT32_MAX;
 };
 
 }  // namespace lwe

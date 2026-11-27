@@ -41,6 +41,9 @@ constexpr wchar_t kBridgeScript[] = LR"js(
     mouse: { x: 0, y: 0, nx: 0, ny: 0, inside: false },
     audio: new Float32Array(64),
     audioLevel: 0,
+    audioBands: { bass: 0, mid: 0, treble: 0 },
+    bpm: 0,
+    beat: 0,
     params: {},
     volume: 1,
     muted: false,
@@ -66,7 +69,13 @@ constexpr wchar_t kBridgeScript[] = LR"js(
       }
       emit('mouse', api.mouse);
     } else if (m.type === 'audio') {
-      api.audio.set(m.bands); api.audioLevel = m.level; emit('audio', api.audio);
+      api.audio.set(m.bands); api.audioLevel = m.level;
+      api.audioBands.bass = m.bass; api.audioBands.mid = m.mid; api.audioBands.treble = m.treble;
+      api.bpm = m.bpm; api.beat = m.beat;
+      emit('audio', api.audio);
+    } else if (m.type === 'beat') {
+      api.bpm = m.bpm; api.beat = 1;
+      emit('beat', { bpm: m.bpm, count: m.count, time: performance.now() });
     } else if (m.type === 'params') {
       Object.assign(api.params, m.values); emit('params', api.params);
     } else if (m.type === 'volume') {
@@ -502,13 +511,25 @@ bool WebBackend::Render(ID3D11RenderTargetView*, const FrameContext& frame) {
         lastDown_ = frame.mouse.pressed;
         lastInside_ = frame.mouse.inside;
     }
-    // Spectre audio : envoye seulement s'il y a du son (aucun message inutile en silence).
-    if (frame.audio && frame.audio->level > 0.001f && frame.frameIndex % 2 == 0) {
-        std::wstring bands;
-        for (size_t i = 0; i < kAudioBandCount; ++i) {
-            bands += std::format(L"{}{:.3f}", i ? L"," : L"", frame.audio->bands[i]);
+    if (frame.audio) {
+        const AudioSpectrum& audio = *frame.audio;
+        // Beat : evenement immediat (front montant du compteur), independamment de la cadence du spectre.
+        if (lastBeatCount_ != audio.beatCount) {
+            if (lastBeatCount_ != UINT32_MAX) {
+                Post(std::format(L"{{\"type\":\"beat\",\"bpm\":{:.1f},\"count\":{}}}", audio.bpm, audio.beatCount));
+            }
+            lastBeatCount_ = audio.beatCount;
         }
-        Post(std::format(L"{{\"type\":\"audio\",\"level\":{:.3f},\"bands\":[{}]}}", frame.audio->level, bands));
+        // Spectre audio : envoye seulement s'il y a du son (aucun message inutile en silence).
+        if (audio.level > 0.001f && frame.frameIndex % 2 == 0) {
+            std::wstring bands;
+            for (size_t i = 0; i < kAudioBandCount; ++i) {
+                bands += std::format(L"{}{:.3f}", i ? L"," : L"", audio.bands[i]);
+            }
+            Post(std::format(L"{{\"type\":\"audio\",\"level\":{:.3f},\"bass\":{:.3f},\"mid\":{:.3f},"
+                             L"\"treble\":{:.3f},\"bpm\":{:.1f},\"beat\":{:.3f},\"bands\":[{}]}}",
+                             audio.level, audio.bass, audio.mid, audio.treble, audio.bpm, audio.beat, bands));
+        }
     }
     return false;  // WebView2 compose lui-meme son contenu
 }

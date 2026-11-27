@@ -66,6 +66,8 @@ public:
     virtual void SetAudioReactive(bool reactive) = 0;
     virtual void SetAudioSensitivity(float sensitivity) = 0;
     virtual void SetAudioAutoGain(bool enabled) = 0;
+    virtual void SetAudioBeatSensitivity(float sensitivity) = 0;
+    virtual void SetAudioSmoothing(float attackMs, float releaseMs) = 0;
     virtual void CurrentAudio(AudioSpectrum& out) const = 0;  // spectre courant (sensibilite globale appliquee)
     virtual std::wstring AudioDeviceName() const = 0;
 

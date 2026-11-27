@@ -17,7 +17,7 @@ namespace lwe {
 //
 // Uniformes disponibles : iResolution, iTime, iTimeDelta, iFrame, iFrameRate, iMouse, iDate,
 // iAudioSpectrum[16] (64 bandes empaquetees, lire via AudioBand(i) / AudioSample(x)), iAudioLevel,
-// iMouseNorm, iParallax, iMouseInside.
+// iBass, iMid, iTreble, iBeat, iBpm, iBeatTime, iBeatCount, iMouseNorm, iParallax, iMouseInside.
 //
 // Parametres exposes a l'interface, declares dans un commentaire du shader :
 //   // @param float intensity 1.0 0.0 2.0 "Intensite"
@@ -77,6 +77,7 @@ private:
 
     double shaderTime_ = 0.0;
     uint64_t localFrame_ = 0;
+    uint32_t beatCountBase_ = UINT32_MAX;  // compteur de beats au lancement du fond
 };
 
 }  // namespace lwe
