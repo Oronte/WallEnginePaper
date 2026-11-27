@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "core/Log.h"
+#include "core/StringUtil.h"
 #include "core/Win32Util.h"
 #include "desktop/DesktopHost.h"
 #include "render/RenderDevice.h"
@@ -61,6 +62,7 @@ MonitorContext::MonitorContext(RenderDevice& device, const DesktopHost& host, HI
 MonitorContext::~MonitorContext() {
     // Ordre important : le backend peut posseder des fenetres enfants (WebView2) et des vues sur
     // le back buffer ; il disparait avant la swap chain, qui disparait avant la fenetre.
+    outgoing_.reset();
     backend_.reset();
     renderTarget_.Reset();
     frameLatencyWaitable_.reset();
@@ -161,7 +163,69 @@ bool MonitorContext::CreateSwapChain(std::wstring& error) {
     return true;
 }
 
-void MonitorContext::AttachBackend(std::unique_ptr<IWallpaperBackend> backend, WallpaperDesc desc) {
+bool MonitorContext::PrepareTransition() {
+    ID3D11Device* device = device_.Device();
+    if (fromTexture_.width != bufferWidth_ || fromTexture_.height != bufferHeight_) {
+        if (!fromTexture_.Create(device, bufferWidth_, bufferHeight_) ||
+            !toTexture_.Create(device, bufferWidth_, bufferHeight_)) {
+            fromTexture_.Reset();
+            toTexture_.Reset();
+            return false;
+        }
+    }
+    if (!transitionRenderer_) {
+        auto renderer = std::make_unique<TransitionRenderer>();
+        std::wstring error;
+        if (!renderer->Initialize(device_, error)) {
+            log::Warn(L"Transition indisponible : {}", error);
+            return false;
+        }
+        transitionRenderer_ = std::move(renderer);
+    }
+    // Contenu initial defini (une video peut ne pas avoir encore de trame a la premiere image).
+    const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    device_.Context()->ClearRenderTargetView(fromTexture_.rtv.Get(), black);
+    device_.Context()->ClearRenderTargetView(toTexture_.rtv.Get(), black);
+    return true;
+}
+
+void MonitorContext::EndTransition() {
+    if (!outgoing_) {
+        return;
+    }
+    outgoing_.reset();
+    log::Info(L"« {} » : transition terminee ({} images en {:.2f} s)", info_.friendlyName, transitionFrames_,
+              transitionElapsed_);
+    // Les textures (2 x la taille de l'ecran en VRAM) ne servent plus : liberees jusqu'a la prochaine fois.
+    fromTexture_.Reset();
+    toTexture_.Reset();
+    if (backend_) {
+        backend_->Invalidate();  // de nouveau dessine directement dans la swap chain
+    }
+}
+
+void MonitorContext::AttachBackend(std::unique_ptr<IWallpaperBackend> backend, WallpaperDesc desc,
+                                   const TransitionRequest& transition) {
+    const bool animate = transition.seconds > 0.0f && transition.type != TransitionType::Random && backend_ &&
+                         backend && backend_->PresentsToSwapChain() && backend->PresentsToSwapChain() && !paused_ &&
+                         swapChain_ && renderTarget_;
+    if (animate) {
+        // Une transition deja en cours : le plus ancien des deux fonds disparait tout de suite.
+        outgoing_.reset();
+        outgoing_ = std::move(backend_);
+        if (PrepareTransition()) {
+            outgoing_->Invalidate();
+            transition_ = transition;
+            transitionElapsed_ = 0.0f;
+            transitionFrames_ = 0;
+            log::Info(L"« {} » : transition {} ({:.1f} s)", info_.friendlyName,
+                      Utf8ToWide(ToString(transition.type)), transition.seconds);
+        } else {
+            outgoing_.reset();
+        }
+    } else {
+        EndTransition();
+    }
     backend_ = std::move(backend);
     desc_ = std::move(desc);
     if (backend_ && paused_) {
@@ -255,7 +319,19 @@ SurfaceStatus MonitorContext::RenderFrame(const FrameTiming& timing, const Audio
         latencyTokenHeld_ = true;
     }
 
-    if (!backend_->Render(renderTarget_.Get(), frame)) {
+    bool finished = false;
+    if (outgoing_) {
+        // Les deux fonds dessinent dans leur texture (s'ils n'ont rien de neuf, la texture garde leur
+        // derniere image), puis le shader de transition compose le resultat dans la swap chain.
+        transitionElapsed_ += frame.deltaTime;
+        const float progress = std::clamp(transitionElapsed_ / std::max(transition_.seconds, 0.001f), 0.0f, 1.0f);
+        outgoing_->Render(fromTexture_.rtv.Get(), frame);
+        backend_->Render(toTexture_.rtv.Get(), frame);
+        transitionRenderer_->Draw(renderTarget_.Get(), fromTexture_.srv.Get(), toTexture_.srv.Get(), bufferWidth_,
+                                  bufferHeight_, progress, transition_.type, transition_.seed);
+        finished = progress >= 1.0f;
+        ++transitionFrames_;
+    } else if (!backend_->Render(renderTarget_.Get(), frame)) {
         return SurfaceStatus::Skipped;  // rien de neuf : l'ecran garde la derniere image, sans Present
     }
 
@@ -263,6 +339,9 @@ SurfaceStatus MonitorContext::RenderFrame(const FrameTiming& timing, const Audio
     // sans dechirure et un Present multi-ecran ne bloque jamais sur la VBlank d'un autre ecran.
     const HRESULT hr = swapChain_->Present(0, 0);
     latencyTokenHeld_ = false;
+    if (finished) {
+        EndTransition();
+    }
     if (hr == DXGI_STATUS_OCCLUDED) {
         occluded_ = true;
         lastOcclusionTest_ = timing.seconds;
@@ -294,6 +373,9 @@ void MonitorContext::SetPaused(bool globalPause, bool autoPause) {
         return;
     }
     paused_ = paused;
+    if (paused) {
+        EndTransition();  // inutile de terminer un fondu que personne ne voit
+    }
     if (backend_) {
         backend_->OnPauseChanged(paused);
         if (paused) {

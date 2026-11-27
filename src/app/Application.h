@@ -32,6 +32,7 @@ struct CommandLineOptions {
     std::filesystem::path wallpaperOverride;  // --wallpaper <fichier> : force un fond (non sauvegarde)
     bool audioDebug = false;                  // --audio-debug : statistiques audio chaque seconde dans le journal
     bool noAutoPause = false;                 // --no-autopause : ignore plein ecran / batterie (mesures)
+    double nextEverySeconds = 0.0;            // --next-every <s> : fond suivant periodique (tests des transitions)
 };
 
 CommandLineOptions ParseCommandLine();
@@ -100,13 +101,17 @@ private:
     void RebuildSurfaces();
     void ScheduleRebuild();
     void DestroySurfaces();
-    void InstallWallpaper(MonitorContext& surface, const WallpaperDesc& desc);
+    void InstallWallpaper(MonitorContext& surface, const WallpaperDesc& desc, const TransitionRequest& transition = {});
+    // Reglage -> transition concrete (type aleatoire resolu, graine tiree) ; coupe nette si desactivee.
+    TransitionRequest MakeTransition(const TransitionSettings& settings);
+    const TransitionSettings& PlaylistTransition() const;
     WallpaperRef AssignedWallpaper(const MonitorInfo& monitor) const;
     void AssignWallpaper(const MonitorInfo& monitor, const WallpaperRef& ref);
     std::wstring MonitorLabel(const MonitorInfo& monitor) const;
 
     FrameTiming NextTiming();
     void RenderFrame();
+    void UpdateIdleState(bool anyPresented);
     void RecoverFromDeviceLoss();
 
     void SetPauseReason(uint32_t reason, bool active);
@@ -131,6 +136,7 @@ private:
     void ExecuteCommand(UINT command);
     void UpdateTrayTooltip();
     void LogSessionStatistics() const;
+    double ProcessCpuMs() const;
 
     static LRESULT CALLBACK StaticWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
@@ -182,6 +188,17 @@ private:
 
     std::map<std::string, int> failureRetries_;  // par ecran : nouvel essai avant le shader de secours
     uint64_t playlistAnchorMs_ = 0;
+    uint64_t lastForcedNextMs_ = 0;
+    // Repos : aucune surface n'a rien presente depuis un moment et la souris ne bouge pas (image fixe,
+    // video entre deux trames lentes...) -> la boucle ne se reveille plus que ~10 fois par seconde.
+    uint32_t idleFrames_ = 0;
+    int64_t idleUntilQpc_ = 0;
+    POINT lastCursor_{};
+    bool lastPrimaryDown_ = false;
+    // Mesure en regime etabli : temps CPU et images au bout de 5 s (chargement exclu).
+    double warmCpuMs_ = -1.0;
+    uint64_t warmTickMs_ = 0;
+    uint64_t warmFrames_ = 0;
     std::mt19937 random_{std::random_device{}()};
 };
 

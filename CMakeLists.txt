@@ -74,6 +74,8 @@ set(LWE_SOURCES
     src/render/FrameLimiter.cpp
     src/render/RenderTexture.h
     src/render/RenderTexture.cpp
+    src/render/TransitionRenderer.h
+    src/render/TransitionRenderer.cpp
     src/render/TextureLoader.h
     src/render/TextureLoader.cpp
 
@@ -173,6 +175,9 @@ add_executable(WallEnginePaperTests
     tests/TestUtil.h
     tests/SpectrumAnalyzerTest.cpp
     tests/BeatDetectorTest.cpp
+    tests/ConfigTest.cpp
+    src/config/AppConfig.cpp
+    src/core/StringUtil.cpp
     src/audio/SpectrumAnalyzer.cpp
     src/audio/BeatDetector.cpp)
 target_include_directories(WallEnginePaperTests PRIVATE src tests)

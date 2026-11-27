@@ -1,0 +1,5 @@
+aurora.hlsl | 15.0 s, 60.0 FPS, CPU processus 34.4 ms/s (3.44 % d'un coeur)
+plasma_spectrum.hlsl | 15.0 s, 60.0 FPS, CPU processus 36.5 ms/s (3.65 % d'un coeur)
+logo.png | 15.1 s, 36.7 FPS, CPU processus 19.7 ms/s (1.97 % d'un coeur)
+Cars.mp4 | 15.0 s, 60.0 FPS, CPU processus 103.0 ms/s (10.30 % d'un coeur)
+index.html | 15.0 s, 60.0 FPS, CPU processus 8.3 ms/s (0.83 % d'un coeur)

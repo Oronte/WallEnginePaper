@@ -97,6 +97,9 @@ public:
     // Le premier appel apres Initialize/Resize doit toujours dessiner.
     virtual bool Render(ID3D11RenderTargetView* target, const FrameContext& frame) = 0;
 
+    // Le prochain Render doit dessiner meme si rien n'a change (changement de cible : transition, effets).
+    virtual void Invalidate() {}
+
     // false : le backend affiche lui-meme son contenu (ex. WebView2) ; la surface ne fait pas de Present.
     virtual bool PresentsToSwapChain() const noexcept { return true; }
 

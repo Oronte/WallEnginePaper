@@ -24,9 +24,11 @@ L'exécutable : `build\vs2026\Release\WallEnginePaper.exe` (garder le dossier `a
 | `--quit` | ferme l'instance en cours |
 | `--no-autopause` | ignore les pauses plein écran / maximisé / batterie pour cette session (mesures) |
 | `--audio-debug` | force la capture audio et résume le signal chaque seconde dans le journal |
+| `--next-every <s>` | passe au fond suivant toutes les *s* secondes (tests des transitions ; modifie la config) |
 
 `tools/bench.sh [secondes] [fonds...]` lance chaque fond avec `--no-autopause --exit-after` et affiche la ligne
-`Session :` du journal (images, FPS, temps CPU). Mesures de référence : `docs/bench-*.txt`.
+`Regime etabli` du journal (FPS et CPU par seconde, mesurés après 5 s pour exclure le chargement). Mesures :
+`docs/bench-*.txt`.
 
 ## Interface
 
@@ -35,9 +37,25 @@ L'exécutable : `build\vs2026\Release\WallEnginePaper.exe` (garder le dossier `a
   aperçu en direct (interactif à la souris), choix de l'écran cible, réglages en temps réel (vitesse, teinte,
   filtre couleur, luminosité, sensibilité audio, parallaxe + paramètres `@param` du shader), réinitialisation.
 - **Écrans** : schéma des écrans à l'échelle avec leur fond, mode « un fond par écran » ou « étendu ».
-- **Playlist** : rotation automatique (intervalle, ordre aléatoire, changement au démarrage, sélection des fonds).
-- **Paramètres** : FPS (15/30/60/144 ou libre), qualité de rendu, volume et sourdine, règles de pause
-  automatique, démarrage avec Windows, dossiers de bibliothèque, dépannage, à propos.
+- **Playlist** : rotation automatique (intervalle, ordre aléatoire, changement au démarrage, sélection des fonds,
+  transition propre à la playlist).
+- **Paramètres** : FPS (15/30/60/144 ou libre), qualité de rendu, transitions, volume et sourdine, audio réactif,
+  règles de pause automatique, démarrage avec Windows, dossiers de bibliothèque, dépannage, à propos.
+
+## Transitions
+
+Au changement de fond (manuel, playlist, « fond suivant », planification), l'ancien et le nouveau fond sont rendus
+chacun dans une `RenderTexture` puis composés par un shader de transition : **fondu**, **dissolve** (bruit
+fractal avec liseré lumineux), **balayage** (direction tirée au hasard, bord adouci), **zoom et fondu**, ou
+**aléatoire**. Durée de 0 à 3 s (0 = coupe nette). Réglage global dans *Paramètres › Transitions*, réglage
+propre dans *Playlist*.
+
+- L'ancien fond n'est libéré qu'à la fin de la transition, ainsi que les deux textures intermédiaires (aucune
+  VRAM conservée au repos).
+- Réappliquer le même fond (réglage réinitialisé, nouvel essai) ne déclenche jamais de transition : une vidéo n'est
+  donc jamais décodée deux fois inutilement (et un même fichier vidéo reste partagé entre écrans).
+- Un fond web s'affiche lui-même (WebView2) : passage en coupe nette s'il est l'ancien ou le nouveau fond.
+- Une surface mise en pause pendant une transition la termine immédiatement.
 
 ## Types de fonds
 
@@ -110,7 +128,8 @@ src/
   desktop/                     DesktopHost (WorkerW classique + 24H2), écrans, MonitorContext (surface)
   input/InputForwarder.*       Curseur global sans hook
   library/Library.*            Catalogue local (assets, fonds importés, dossiers, project.json)
-  render/                      Device D3D11 partagé, FrameLimiter, RenderTexture, TextureLoader (WIC)
+  render/                      Device D3D11 partagé, FrameLimiter, RenderTexture, TextureLoader (WIC),
+                               TransitionRenderer (shader de transition)
   system/Autostart.*           Clé Run de l'utilisateur
   watchdog/PerformanceWatchdog.*  Plein écran / maximisé par écran, batterie, mode présentation
   wallpaper/IWallpaperBackend.h, WallpaperFactory.*   Contrat commun, fabrique
@@ -168,6 +187,8 @@ zones graves / médiums / aigus, relâchement réglable.
 `tests/BeatDetectorTest.cpp` : clics à 90/120/128/140 BPM et kick + charleston à 100/120/128 BPM (tempo à ±2 BPM,
 nombre de beats, charleston ignoré), décroissance de l'intensité, silence, bruit rose et son tenu sans beat, oubli
 du tempo, sensibilité. `LWE_BEAT_TRACE=1` affiche la nouveauté et le seuil image par image.
+`tests/ConfigTest.cpp` : aller-retour JSON des nouveaux réglages, ancien `config.json` (valeurs par défaut),
+valeurs aberrantes bornées, transition aléatoire toujours concrète.
 
 ## Points d'architecture
 
@@ -185,6 +206,11 @@ dort (0 % CPU) et la mémoire temporaire du pilote est rendue (`IDXGIDevice3::Tr
 latence, priorité CPU basse et priorité GPU abaissée, shaders compilés une seule fois pour N écrans.
 Mesuré (RTX 3080, 2 écrans 1080p, 60 FPS) : ~2,3 % d'un cœur et ~47 Mo fenêtre fermée ; ~3 % et ~56 Mo
 fenêtre ouverte.
+
+**Repos.** Quand aucune surface n'a rien présenté depuis ~0,5 s (image fixe, vidéo entre deux trames lentes) et
+que la souris ne bouge pas, la boucle ne se réveille plus que 10 fois par seconde au lieu de 60 : une image fixe
+passe de ~1 à 3 % d'un cœur à ~0,3 à 0,9 %. Le moindre mouvement de souris (parallaxe), un réglage ou un
+changement de fond rétablit aussitôt la cadence normale.
 
 ## Écrire un shader
 

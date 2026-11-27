@@ -24,6 +24,7 @@ public:
     std::vector<ParamDescriptor> Parameters() const override;
     ParamMap ParameterValues() const override;
     void SetParameter(std::string_view name, const ParamValue& value) override;
+    void Invalidate() override { dirty_ = true; }
 
     void OnPauseChanged(bool paused) override;
     void ReleaseNonCriticalResources() override;

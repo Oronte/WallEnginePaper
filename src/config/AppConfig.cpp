@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <type_traits>
 
 #include <nlohmann/json.hpp>
@@ -17,6 +18,8 @@ struct TypeName {
     WallpaperType type;
     const char* name;
 };
+
+constexpr const char* kTransitionNames[] = {"fade", "dissolve", "wipe", "zoomFade", "random"};
 
 constexpr TypeName kTypeNames[] = {
     {WallpaperType::Shader, "shader"},
@@ -139,6 +142,29 @@ std::vector<std::filesystem::path> PathListFromJson(const json& object, const ch
     return paths;
 }
 
+json TransitionToJson(const TransitionSettings& transition) {
+    return json{{"type", ToString(transition.type)}, {"seconds", transition.seconds}};
+}
+
+void TransitionFromJson(const json& object, TransitionSettings& out) {
+    if (!object.is_object()) {
+        return;
+    }
+    std::string type;
+    ReadValue(object, "type", type);
+    if (const auto parsed = ParseTransitionType(type)) {
+        out.type = *parsed;
+    }
+    ReadValue(object, "seconds", out.seconds);
+}
+
+void SanitizeTransition(TransitionSettings& transition) {
+    if (!std::isfinite(transition.seconds)) {
+        transition.seconds = 1.0f;
+    }
+    transition.seconds = std::clamp(transition.seconds, 0.0f, 3.0f);
+}
+
 }  // namespace
 
 const char* ToString(WallpaperType type) noexcept {
@@ -157,6 +183,29 @@ std::optional<WallpaperType> ParseWallpaperType(std::string_view text) noexcept 
         }
     }
     return std::nullopt;
+}
+
+const char* ToString(TransitionType type) noexcept {
+    const auto index = static_cast<size_t>(type);
+    return index < std::size(kTransitionNames) ? kTransitionNames[index] : "fade";
+}
+
+std::optional<TransitionType> ParseTransitionType(std::string_view text) noexcept {
+    for (size_t i = 0; i < std::size(kTransitionNames); ++i) {
+        if (text == kTransitionNames[i]) {
+            return static_cast<TransitionType>(i);
+        }
+    }
+    return std::nullopt;
+}
+
+TransitionType ResolveTransitionType(TransitionType type, float random01) noexcept {
+    if (type != TransitionType::Random) {
+        return type;
+    }
+    constexpr int kConcrete = kTransitionTypeCount - 1;
+    const int index = std::clamp(static_cast<int>(random01 * kConcrete), 0, kConcrete - 1);
+    return static_cast<TransitionType>(index);
 }
 
 std::optional<WallpaperType> GuessWallpaperType(const std::filesystem::path& file) {
@@ -198,6 +247,8 @@ void AppConfig::Sanitize() {
     audio.attackMs = std::clamp(finiteOr(audio.attackMs, 10.0f), 0.0f, 500.0f);
     audio.releaseMs = std::clamp(finiteOr(audio.releaseMs, 200.0f), 10.0f, 3000.0f);
     playlist.intervalMinutes = std::clamp<uint32_t>(playlist.intervalMinutes, 1, 24 * 60);
+    SanitizeTransition(transition);
+    SanitizeTransition(playlist.transition);
     if (defaultWallpaper.Empty()) {
         defaultWallpaper = AppConfig{}.defaultWallpaper;
     }
@@ -256,7 +307,10 @@ std::string SerializeConfig(const AppConfig& config) {
         {"shuffle", config.playlist.shuffle},
         {"advanceOnStartup", config.playlist.advanceOnStartup},
         {"items", PathListToJson(config.playlist.items)},
+        {"customTransition", config.playlist.customTransition},
+        {"transition", TransitionToJson(config.playlist.transition)},
     };
+    root["transition"] = TransitionToJson(config.transition);
     root["startWithWindows"] = config.startWithWindows;
     root["libraryFolders"] = PathListToJson(config.libraryFolders);
     return root.dump(2);
@@ -336,6 +390,13 @@ bool DeserializeConfig(std::string_view text, AppConfig& out, std::string& error
         ReadValue(*it, "shuffle", config.playlist.shuffle);
         ReadValue(*it, "advanceOnStartup", config.playlist.advanceOnStartup);
         config.playlist.items = PathListFromJson(*it, "items");
+        ReadValue(*it, "customTransition", config.playlist.customTransition);
+        if (const auto t = it->find("transition"); t != it->end()) {
+            TransitionFromJson(*t, config.playlist.transition);
+        }
+    }
+    if (const auto it = root.find("transition"); it != root.end()) {
+        TransitionFromJson(*it, config.transition);
     }
     ReadValue(root, "startWithWindows", config.startWithWindows);
     config.libraryFolders = PathListFromJson(root, "libraryFolders");

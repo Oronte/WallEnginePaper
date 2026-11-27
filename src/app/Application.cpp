@@ -37,6 +37,8 @@ constexpr UINT kRebuildDebounceMs = 600;
 constexpr uint32_t kRetryWithoutSurfaceTicks = 5;
 constexpr uint32_t kUiFps = 60;
 constexpr UINT kTrayIconId = 1;
+constexpr uint32_t kIdleAfterFrames = 30;  // ~0,5 s sans rien de neuf a 60 FPS
+constexpr uint32_t kIdleWakeupsPerSecond = 10;
 
 // GUID_CONSOLE_DISPLAY_STATE (winnt.h), redefini ici pour ne pas dependre de initguid.h.
 constexpr GUID kConsoleDisplayState = {0x6fe69556, 0x704a, 0x47a0, {0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47}};
@@ -99,6 +101,8 @@ CommandLineOptions ParseCommandLine() {
             options.minimized = true;
         } else if (arg == L"--exit-after" && i + 1 < argc) {
             options.exitAfterSeconds = std::wcstod(argv[++i], nullptr);
+        } else if (arg == L"--next-every" && i + 1 < argc) {
+            options.nextEverySeconds = std::wcstod(argv[++i], nullptr);
         } else if (arg == L"--no-autopause") {
             options.noAutoPause = true;
         } else if (arg == L"--audio-debug") {
@@ -287,7 +291,7 @@ void Application::RunMessageLoop() {
             MsgWaitForMultipleObjectsEx(0, nullptr, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             continue;
         }
-        if (wallpapersActive && limiter_.IsFrameDue()) {
+        if (wallpapersActive && limiter_.IsFrameDue() && QpcNow() >= idleUntilQpc_) {
             RenderFrame();
             ++framesRendered_;
             limiter_.OnFrameRendered();
@@ -299,7 +303,7 @@ void Application::RunMessageLoop() {
 
         int64_t deadline = std::numeric_limits<int64_t>::max();
         if (wallpapersActive) {
-            deadline = limiter_.NextDeadline();
+            deadline = std::max(limiter_.NextDeadline(), idleUntilQpc_);
         }
         if (uiActive) {
             deadline = std::min(deadline, uiLimiter_.NextDeadline());
@@ -476,7 +480,26 @@ void Application::RebuildSurfaces() {
     log::Info(L"{} surface(s) active(s)", surfaces_.size());
 }
 
-void Application::InstallWallpaper(MonitorContext& surface, const WallpaperDesc& desc) {
+TransitionRequest Application::MakeTransition(const TransitionSettings& settings) {
+    TransitionRequest request;
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    request.type = ResolveTransitionType(settings.type, unit(random_));
+    request.seconds = settings.seconds;
+    request.seed = unit(random_);
+    return request;
+}
+
+const TransitionSettings& Application::PlaylistTransition() const {
+    const PlaylistSettings& playlist = config_.Data().playlist;
+    return playlist.customTransition ? playlist.transition : config_.Data().transition;
+}
+
+void Application::InstallWallpaper(MonitorContext& surface, const WallpaperDesc& desc,
+                                   const TransitionRequest& transition) {
+    idleFrames_ = 0;  // le nouveau fond doit dessiner tout de suite
+    idleUntilQpc_ = 0;
+    // Meme fond (reinstallation apres un reglage, nouvel essai) : jamais de transition.
+    const bool sameSource = PathKey(surface.Desc().source) == PathKey(desc.source) && surface.Backend();
     std::wstring error;
     if (auto backend = CreateWallpaperBackend(desc.type, error)) {
         const AudioSettings& audio = config_.Data().audio;
@@ -485,7 +508,7 @@ void Application::InstallWallpaper(MonitorContext& surface, const WallpaperDesc&
         if (backend->Initialize(init, error)) {
             log::Info(L"« {} » affiche {}", surface.Info().friendlyName,
                       desc.source.empty() ? std::wstring(L"le shader integre") : desc.source.wstring());
-            surface.AttachBackend(std::move(backend), desc);
+            surface.AttachBackend(std::move(backend), desc, sameSource ? TransitionRequest{} : transition);
             return;
         }
     }
@@ -525,16 +548,20 @@ void Application::RenderFrame() {
     CurrentAudio(audio_);
     input_.Update();
     const FrameTiming timing = NextTiming();
+    bool anyPresented = false;
     for (auto& surface : surfaces_) {
         if (surface->IsPaused()) {
             continue;
         }
         surface->UpdatePointer(input_.State(), timing.deltaSeconds);
-        if (surface->RenderFrame(timing, audio_) == SurfaceStatus::DeviceLost) {
+        const SurfaceStatus status = surface->RenderFrame(timing, audio_);
+        if (status == SurfaceStatus::DeviceLost) {
             RecoverFromDeviceLoss();
             return;
         }
+        anyPresented = anyPresented || status == SurfaceStatus::Presented;
     }
+    UpdateIdleState(anyPresented);
 
     ++fpsWindowFrames_;
     const uint64_t now = GetTickCount64();
@@ -542,6 +569,22 @@ void Application::RenderFrame() {
         measuredFps_ = static_cast<float>(fpsWindowFrames_ * 1000.0 / static_cast<double>(now - fpsWindowStartMs_));
         fpsWindowFrames_ = 0;
         fpsWindowStartMs_ = now;
+    }
+}
+
+void Application::UpdateIdleState(bool anyPresented) {
+    const GlobalPointerState& pointer = input_.State();
+    const bool pointerMoved = pointer.valid && (pointer.cursor.x != lastCursor_.x || pointer.cursor.y != lastCursor_.y ||
+                                                pointer.primaryDown != lastPrimaryDown_);
+    lastCursor_ = pointer.cursor;
+    lastPrimaryDown_ = pointer.primaryDown;
+    if (anyPresented || pointerMoved) {
+        idleFrames_ = 0;
+        idleUntilQpc_ = 0;
+        return;
+    }
+    if (++idleFrames_ >= kIdleAfterFrames) {
+        idleUntilQpc_ = QpcNow() + qpcFrequency_ / kIdleWakeupsPerSecond;
     }
 }
 
@@ -653,6 +696,11 @@ std::wstring Application::StatusText() const {
 void Application::MaintenanceTick() {
     config_.FlushIfDirty();
 
+    if (warmCpuMs_ < 0.0 && GetTickCount64() - startTickMs_ >= 5000) {
+        warmCpuMs_ = ProcessCpuMs();
+        warmTickMs_ = GetTickCount64();
+        warmFrames_ = framesRendered_;
+    }
     if (options_.exitAfterSeconds > 0.0 &&
         static_cast<double>(GetTickCount64() - startTickMs_) / 1000.0 >= options_.exitAfterSeconds) {
         log::Info(L"--exit-after atteint : arret");
@@ -684,6 +732,14 @@ void Application::MaintenanceTick() {
     }
     ReplaceFailedBackends();
     PlaylistTick();
+    if (options_.nextEverySeconds > 0.0 &&
+        static_cast<double>(GetTickCount64() - lastForcedNextMs_) >= options_.nextEverySeconds * 1000.0) {
+        if (lastForcedNextMs_ != 0) {
+            log::Info(L"--next-every : fond suivant");
+            NextWallpaper();
+        }
+        lastForcedNextMs_ = GetTickCount64();
+    }
     UpdateAudioCapture();
 }
 
@@ -827,6 +883,7 @@ void Application::AdvanceWallpapers() {
     options_.wallpaperOverride.clear();
     failureRetries_.clear();
     const bool shuffle = config_.Data().playlist.enabled && config_.Data().playlist.shuffle;
+    const TransitionRequest transition = MakeTransition(PlaylistTransition());
     for (auto& surface : surfaces_) {
         const std::wstring current = PathKey(surface->Desc().source);
         size_t currentIndex = candidates.size();
@@ -846,7 +903,7 @@ void Application::AdvanceWallpapers() {
         }
         const WallpaperRef ref = candidates[next]->Ref();
         AssignWallpaper(surface->Info(), ref);
-        InstallWallpaper(*surface, config_.Resolve(ref));
+        InstallWallpaper(*surface, config_.Resolve(ref), transition);
     }
     ApplyPauseState();
 }
@@ -944,9 +1001,10 @@ void Application::ApplyWallpaper(const LibraryItem& item, const std::string& mon
     config_.MarkDirty();
 
     const WallpaperDesc desc = config_.Resolve(ref);
+    const TransitionRequest transition = MakeTransition(config.transition);
     for (auto& surface : surfaces_) {
         if (allScreens || surface->Info().id == monitorId) {
-            InstallWallpaper(*surface, desc);
+            InstallWallpaper(*surface, desc, transition);
         }
     }
     ApplyPauseState();
@@ -1068,6 +1126,17 @@ void Application::UpdateTrayTooltip() {
     tray_.SetTooltip(std::format(L"{} – {}", kProductName, StatusText()));
 }
 
+double Application::ProcessCpuMs() const {
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user)) {
+        return 0.0;
+    }
+    const auto toMs = [](const FILETIME& ft) {
+        return static_cast<double>((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10'000.0;
+    };
+    return toMs(kernel) + toMs(user);
+}
+
 void Application::LogSessionStatistics() const {
     if (startTickMs_ == 0) {
         return;
@@ -1089,6 +1158,15 @@ void Application::LogSessionStatistics() const {
               L"CPU processus {:.0f} ms",
               seconds, framesRendered_, seconds > 0.0 ? static_cast<double>(framesRendered_) / seconds : 0.0,
               loopWakeups_, threadMs, processMs);
+    if (warmCpuMs_ >= 0.0) {
+        const double warmSeconds = static_cast<double>(GetTickCount64() - warmTickMs_) / 1000.0;
+        if (warmSeconds >= 1.0) {
+            const double cpuPerSecond = (processMs - warmCpuMs_) / warmSeconds;
+            log::Info(L"Regime etabli : {:.1f} s, {:.1f} FPS, CPU processus {:.1f} ms/s ({:.2f} % d'un coeur)",
+                      warmSeconds, static_cast<double>(framesRendered_ - warmFrames_) / warmSeconds, cpuPerSecond,
+                      cpuPerSecond / 10.0);
+        }
+    }
 }
 
 void Application::ShowTrayMenu() {

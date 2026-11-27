@@ -68,6 +68,7 @@ private:
     void EnsurePreview(const LibraryItem& item);
     void RenderPreview(float deltaSeconds, const MouseState& mouse);
     bool DrawParameter(const ParamDescriptor& desc, ParamValue& value);
+    bool DrawTransitionSettings(TransitionSettings& transition, const char* id);
 
     void Toast(std::string message);
 

@@ -1209,6 +1209,14 @@ void ControlPanelViews::DrawPlaylist() {
     }
     changed |= ImGui::Checkbox(WithIcon(icon::kShuffle, "Ordre aléatoire").c_str(), &playlist.shuffle);
     changed |= ImGui::Checkbox("Changer de fond à chaque démarrage", &playlist.advanceOnStartup);
+    changed |= ImGui::Checkbox("Transition propre à la playlist", &playlist.customTransition);
+    if (playlist.customTransition) {
+        ImGui::Indent();
+        changed |= DrawTransitionSettings(playlist.transition, "playlist");
+        ImGui::Unindent();
+    } else {
+        DimText("La transition réglée dans Paramètres est utilisée.");
+    }
     if (playlist.enabled) {
         const double minutes = services_.MinutesUntilPlaylistChange();
         ImGui::PushStyleColor(ImGuiCol_Text, color::kAccent2);
@@ -1274,6 +1282,28 @@ void ControlPanelViews::DrawPlaylist() {
 //  Parametres
 // --------------------------------------------------------------------------------------------- //
 
+bool ControlPanelViews::DrawTransitionSettings(TransitionSettings& transition, const char* id) {
+    static constexpr const char* kNames[kTransitionTypeCount] = {"Fondu", "Dissolve", "Balayage", "Zoom et fondu",
+                                                                 "Aléatoire"};
+    const float s = scale_;
+    bool changed = false;
+    int type = static_cast<int>(transition.type);
+    ImGui::SetNextItemWidth(200 * s);
+    if (ImGui::Combo(std::format("Effet##transition_type_{}", id).c_str(), &type, kNames, kTransitionTypeCount)) {
+        transition.type = static_cast<TransitionType>(std::clamp(type, 0, kTransitionTypeCount - 1));
+        changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(220 * s);
+    const char* format = transition.seconds <= 0.0f ? "Coupe nette" : "%.1f s";
+    if (ImGui::SliderFloat(std::format("Durée##transition_seconds_{}", id).c_str(), &transition.seconds, 0.0f, 3.0f,
+                           format)) {
+        transition.seconds = std::clamp(std::round(transition.seconds * 10.0f) / 10.0f, 0.0f, 3.0f);
+        changed = true;
+    }
+    return changed;
+}
+
 void ControlPanelViews::DrawSettings() {
     const float s = scale_;
     AppConfig& config = services_.Config().Data();
@@ -1318,6 +1348,11 @@ void ControlPanelViews::DrawSettings() {
             "pour le GPU, idéal sur écran 4K ou PC portable.");
     ImGui::TextDisabled("GPU : %s  ·  rendu actuel : %.0f FPS", U8(services_.Device().AdapterName()).c_str(),
                         services_.MeasuredFps());
+
+    section(icon::kNext, "Transitions");
+    dirty |= DrawTransitionSettings(config.transition, "global");
+    DimText("Au changement de fond (manuel, playlist, planification), l'ancien et le nouveau sont mélangés. Les "
+            "fonds web passent en coupe nette.");
 
     section(icon::kVolume, "Audio");
     bool muted = config.audio.muted;

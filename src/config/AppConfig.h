@@ -70,12 +70,30 @@ struct AudioSettings {
     float releaseMs = 200.0f;      // descente
 };
 
+// Transition entre deux fonds (changement manuel, playlist, planification).
+enum class TransitionType : uint8_t { Fade, Dissolve, Wipe, ZoomFade, Random };
+inline constexpr int kTransitionTypeCount = 5;  // Random compris
+
+const char* ToString(TransitionType type) noexcept;
+std::optional<TransitionType> ParseTransitionType(std::string_view text) noexcept;
+// Random -> un type concret choisi a partir de random01 dans [0, 1[ ; les autres types sont inchanges.
+TransitionType ResolveTransitionType(TransitionType type, float random01) noexcept;
+
+struct TransitionSettings {
+    TransitionType type = TransitionType::Fade;
+    float seconds = 1.0f;  // 0 = coupe nette, 3 au plus
+
+    bool operator==(const TransitionSettings&) const = default;
+};
+
 struct PlaylistSettings {
     bool enabled = false;
     uint32_t intervalMinutes = 15;
     bool shuffle = false;
     bool advanceOnStartup = false;
     std::vector<std::filesystem::path> items;
+    bool customTransition = false;  // sinon : transition globale (Parametres)
+    TransitionSettings transition;
 };
 
 struct AppConfig {
@@ -95,6 +113,7 @@ struct AppConfig {
     PauseRules pause;
     AudioSettings audio;
     PlaylistSettings playlist;
+    TransitionSettings transition;
     bool startWithWindows = true;
     std::vector<std::filesystem::path> libraryFolders;
 
