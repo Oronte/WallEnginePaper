@@ -686,7 +686,31 @@ void ControlPanelViews::RenderPreview(float deltaSeconds, const MouseState& mous
     frame.mouse = mouse;
     services_.CurrentAudio(previewAudio_);  // l'apercu reagit a la musique comme le vrai fond
     frame.audio = &previewAudio_;
-    previewBackend_->Render(previewTarget_.rtv.Get(), frame);
+
+    const auto& effectsMap = services_.Config().Data().effects;
+    const auto it = effectsMap.find(previewId_);
+    std::wstring error;
+    if (it == effectsMap.end() || !it->second.Active() ||
+        !previewEffects_.Prepare(services_.Device(), kPreviewWidth, kPreviewHeight, error)) {
+        previewEffects_.Release();
+        previewBackend_->Invalidate();  // (l'apercu redessine toujours : rien a perdre)
+        previewBackend_->Render(previewTarget_.rtv.Get(), frame);
+        return;
+    }
+    previewBackend_->Invalidate();
+    previewBackend_->Render(previewEffects_.SceneTarget(), frame);
+    previewRipples_.Advance(deltaSeconds);
+    previewEffectsTime_ += deltaSeconds;
+    EffectFrame effectFrame;
+    effectFrame.time = previewEffectsTime_;
+    effectFrame.bass = previewAudio_.bass;
+    effectFrame.beat = previewAudio_.beat;
+    effectFrame.mouseX = mouse.x;
+    effectFrame.mouseY = static_cast<float>(kPreviewHeight) - mouse.y;
+    effectFrame.mouseInside = mouse.inside;
+    effectFrame.ripples = &previewRipples_;
+    effectFrame.trail = &previewTrail_;
+    previewEffects_.Apply(previewTarget_.rtv.Get(), it->second, effectFrame);
 }
 
 bool ControlPanelViews::DrawParameter(const ParamDescriptor& desc, ParamValue& value) {
@@ -754,6 +778,134 @@ bool ControlPanelViews::DrawParameter(const ParamDescriptor& desc, ParamValue& v
         return true;
     }
     return false;
+}
+
+void ControlPanelViews::DrawEffects(const LibraryItem& item) {
+    const float s = scale_;
+    ImGui::Spacing();
+    if (!ImGui::CollapsingHeader("Effets et interaction")) {
+        return;
+    }
+    if (item.type == WallpaperType::Web) {
+        DimText("Les fonds web s'affichent eux-mêmes (WebView2) : effets, particules et interaction ne s'y appliquent pas.");
+        return;
+    }
+    AppConfig& config = services_.Config().Data();
+    EffectSettings effects;
+    if (const auto it = config.effects.find(item.id); it != config.effects.end()) {
+        effects = it->second;
+    }
+    bool changed = false;
+    bool committed = false;  // fin d'un glisser : moment d'enregistrer
+    const auto track = [&](bool edited) {
+        changed |= edited;
+        committed |= ImGui::IsItemDeactivatedAfterEdit() || (edited && !ImGui::IsItemActive());
+    };
+
+    static constexpr const char* kEffectLabels[kEffectCount] = {"Aberration chromatique", "Flou", "Bloom",
+                                                                "Vignettage", "Grain film", "Lignes de balayage"};
+    ImGui::SeparatorText("Post-effets (dans l'ordre d'application)");
+    int moveFrom = -1;
+    int moveTo = -1;
+    for (size_t i = 0; i < kEffectCount; ++i) {
+        const EffectId id = effects.order[i];
+        const size_t index = static_cast<size_t>(id);
+        ImGui::PushID(static_cast<int>(index));
+        ImGui::BeginDisabled(i == 0);
+        if (ImGui::ArrowButton("##up", ImGuiDir_Up)) {
+            moveFrom = static_cast<int>(i);
+            moveTo = static_cast<int>(i) - 1;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, 2 * s);
+        ImGui::BeginDisabled(i + 1 == kEffectCount);
+        if (ImGui::ArrowButton("##down", ImGuiDir_Down)) {
+            moveFrom = static_cast<int>(i);
+            moveTo = static_cast<int>(i) + 1;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        float value = effects.strength[index] * 100.0f;
+        const std::string format = std::string(kEffectLabels[index]) + (value <= 0.0f ? " : désactivé" : " : %.0f %%");
+        if (ImGui::SliderFloat("##strength", &value, 0.0f, 100.0f, format.c_str())) {
+            effects.strength[index] = std::clamp(value / 100.0f, 0.0f, 1.0f);
+            changed = true;
+        }
+        committed |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::PopID();
+    }
+    if (moveFrom >= 0) {
+        std::swap(effects.order[static_cast<size_t>(moveFrom)], effects.order[static_cast<size_t>(moveTo)]);
+        changed = committed = true;
+    }
+
+    ImGui::SeparatorText("Particules");
+    static constexpr const char* kOverlayLabels[kOverlayCount] = {"Aucune", "Pluie sur vitre", "Neige", "Lucioles",
+                                                                  "Poussière"};
+    int overlay = static_cast<int>(effects.overlay);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::Combo("##overlay", &overlay, kOverlayLabels, static_cast<int>(kOverlayCount))) {
+        effects.overlay = static_cast<OverlayType>(overlay);
+        changed = committed = true;
+    }
+    if (effects.overlay != OverlayType::None) {
+        const auto percent = [&](const char* label, float& v) {
+            float shown = v * 100.0f;
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::SliderFloat(label, &shown, 0.0f, 100.0f, (std::string(label + 2) + " : %.0f %%").c_str())) {
+                v = std::clamp(shown / 100.0f, 0.0f, 1.0f);
+                changed = true;
+            }
+            committed |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        percent("##Intensité", effects.overlayIntensity);
+        percent("##Réaction au son", effects.overlayAudio);
+        percent("##Réaction à la souris", effects.overlayMouse);
+    }
+
+    ImGui::SeparatorText("Souris");
+    if (ImGui::Checkbox("Ondulations au clic sur le bureau", &effects.ripples)) {
+        changed = committed = true;
+    }
+    if (effects.ripples) {
+        float strength = effects.rippleStrength * 100.0f;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::SliderFloat("##ripple_strength", &strength, 0.0f, 100.0f, "Amplitude : %.0f %%")) {
+            effects.rippleStrength = std::clamp(strength / 100.0f, 0.0f, 1.0f);
+            changed = true;
+        }
+        committed |= ImGui::IsItemDeactivatedAfterEdit();
+    }
+    if (ImGui::Checkbox("Traînée derrière le curseur", &effects.trail)) {
+        changed = committed = true;
+    }
+    if (effects.trail) {
+        ImGui::SameLine();
+        if (ImGui::ColorEdit3("##trail_color", effects.trailColor.data(), ImGuiColorEditFlags_NoInputs)) {
+            changed = true;
+        }
+        committed |= ImGui::IsItemDeactivatedAfterEdit();
+    }
+    DimText("Sans aucun effet, le fond est dessiné directement : aucun coût. Cliquez dans l'aperçu pour essayer.");
+
+    if (changed) {
+        // L'apercu suit en direct ; l'ecran et config.json a la fin du geste (pas a chaque pixel de glisser).
+        config.effects[item.id] = effects;
+        if (effects == EffectSettings{}) {
+            config.effects.erase(item.id);
+        }
+    }
+    if (committed) {
+        services_.SetWallpaperEffects(item, effects);
+    }
+    ImGui::Spacing();
+    if (ImGui::Button(WithIcon(icon::kReset, "Réinitialiser les effets").c_str(), ImVec2(-FLT_MIN, 0))) {
+        services_.ResetWallpaperEffects(item);
+        previewRipples_.Clear();
+        previewTrail_.Clear();
+        Toast("Effets réinitialisés");
+    }
 }
 
 void ControlPanelViews::DrawParameters(const LibraryItem& item) {
@@ -831,11 +983,14 @@ void ControlPanelViews::DrawDetails(float deltaSeconds) {
         if (down && !previewMouse_.pressed) {
             previewMouse_.clickX = previewMouse_.x;
             previewMouse_.clickY = previewMouse_.y;
+            previewRipples_.Add(u * kPreviewWidth, v * kPreviewHeight);
         }
+        previewTrail_.Update(u * kPreviewWidth, v * kPreviewHeight, true, deltaSeconds);
         previewMouse_.pressed = down;
     } else {
         previewMouse_.inside = false;
         previewMouse_.pressed = false;
+        previewTrail_.Update(0.0f, 0.0f, false, deltaSeconds);
         previewMouse_.normX *= 0.9f;
         previewMouse_.normY *= 0.9f;
     }
@@ -940,6 +1095,7 @@ void ControlPanelViews::DrawDetails(float deltaSeconds) {
 
     ImGui::Spacing();
     DrawParameters(*item);
+    DrawEffects(*item);
 }
 
 // --------------------------------------------------------------------------------------------- //

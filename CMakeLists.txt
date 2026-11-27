@@ -78,6 +78,11 @@ set(LWE_SOURCES
     src/render/TransitionRenderer.cpp
     src/render/TextureWriter.h
     src/render/TextureWriter.cpp
+    src/render/EffectsRenderer.h
+    src/render/EffectsRenderer.cpp
+
+    src/effects/Interaction.h
+    src/effects/Interaction.cpp
     src/render/TextureLoader.h
     src/render/TextureLoader.cpp
 
@@ -97,6 +102,8 @@ set(LWE_SOURCES
     src/system/MediaSession.cpp
     src/system/SystemStats.h
     src/system/SystemStats.cpp
+    src/system/GpuUsage.h
+    src/system/GpuUsage.cpp
     src/system/Autostart.cpp
 
     src/watchdog/PerformanceWatchdog.h
@@ -195,6 +202,8 @@ add_executable(WallEnginePaperTests
     tests/BeatDetectorTest.cpp
     tests/ConfigTest.cpp
     tests/ControlTest.cpp
+    tests/EffectsTest.cpp
+    src/effects/Interaction.cpp
     src/control/SunTimes.cpp
     src/control/Scheduler.cpp
     src/control/Profiles.cpp

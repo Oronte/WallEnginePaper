@@ -22,6 +22,7 @@
 #include "input/InputForwarder.h"
 #include "library/Library.h"
 #include "render/FrameLimiter.h"
+#include "system/GpuUsage.h"
 #include "render/RenderDevice.h"
 #include "ui/ControlPanel.h"
 #include "ui/TrayIcon.h"
@@ -41,6 +42,7 @@ struct CommandLineOptions {
     double captureDelaySeconds = 4.0;
     uint32_t captureWidth = 960;              // --capture-width <px> (0 = taille de l'ecran)
     bool captureDone = false;
+    bool gpuTiming = false;                   // --gpu-timing : temps GPU par image dans le journal (mesures)
 };
 
 CommandLineOptions ParseCommandLine();
@@ -67,6 +69,8 @@ public:
     std::vector<SurfaceStatusInfo> Surfaces() const override;
     void ApplyWallpaper(const LibraryItem& item, const std::string& monitorId) override;
     void SetWallpaperParameter(const LibraryItem& item, const std::string& name, const ParamValue& value) override;
+    void SetWallpaperEffects(const LibraryItem& item, const EffectSettings& effects) override;
+    void ResetWallpaperEffects(const LibraryItem& item) override;
     void ResetWallpaperParameters(const LibraryItem& item) override;
     void NextWallpaper() override;
     void PreviousWallpaper() override;
@@ -145,6 +149,7 @@ private:
     void AdvanceWallpapers(int direction = 1);
     void ApplyWallpaperRef(const WallpaperRef& ref, const std::string& monitorId, const TransitionRequest& transition);
     void RememberCurrent(const MonitorContext& surface);
+    EffectSettings EffectsFor(const std::filesystem::path& source) const;
 
     // Profils et accessibilite : reglages effectifs recalcules, seules les differences sont appliquees.
     void RefreshEffectiveSettings(const std::string& profile);
@@ -229,6 +234,11 @@ private:
     double warmCpuMs_ = -1.0;
     uint64_t warmTickMs_ = 0;
     uint64_t warmFrames_ = 0;
+    // --gpu-timing : utilisation GPU de ce processus, moyennee sur le regime etabli.
+    GpuUsage gpuUsage_;
+    double gpuRenderSum_ = 0.0;
+    double gpuDecodeSum_ = 0.0;
+    uint32_t gpuSamples_ = 0;
     std::mt19937 random_{std::random_device{}()};
 
     HotkeyManager hotkeys_;

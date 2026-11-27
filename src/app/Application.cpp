@@ -118,6 +118,8 @@ CommandLineOptions ParseCommandLine() {
             options.captureWidth = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
         } else if (arg == L"--next-every" && i + 1 < argc) {
             options.nextEverySeconds = std::wcstod(argv[++i], nullptr);
+        } else if (arg == L"--gpu-timing") {
+            options.gpuTiming = true;
         } else if (arg == L"--no-autopause") {
             options.noAutoPause = true;
         } else if (arg == L"--audio-debug") {
@@ -531,6 +533,7 @@ void Application::InstallWallpaper(MonitorContext& surface, const WallpaperDesc&
             log::Info(L"« {} » affiche {}", surface.Info().friendlyName,
                       desc.source.empty() ? std::wstring(L"le shader integre") : desc.source.wstring());
             surface.AttachBackend(std::move(backend), desc, sameSource ? TransitionRequest{} : transition);
+            surface.SetEffects(EffectsFor(desc.source));
             return;
         }
     }
@@ -723,6 +726,18 @@ void Application::MaintenanceTick() {
         warmCpuMs_ = ProcessCpuMs();
         warmTickMs_ = GetTickCount64();
         warmFrames_ = framesRendered_;
+        if (options_.gpuTiming) {
+            gpuUsage_.Start();  // premier echantillon : les mesures commencent au tick suivant
+        }
+    } else if (warmCpuMs_ >= 0.0 && gpuUsage_.IsRunning()) {
+        double render = -1.0;
+        double decode = -1.0;
+        gpuUsage_.Sample(render, decode);
+        if (render >= 0.0) {
+            gpuRenderSum_ += render;
+            gpuDecodeSum_ += std::max(0.0, decode);
+            ++gpuSamples_;
+        }
     }
     if (options_.exitAfterSeconds > 0.0 &&
         static_cast<double>(GetTickCount64() - startTickMs_) / 1000.0 >= options_.exitAfterSeconds) {
@@ -1085,6 +1100,34 @@ void Application::SetWallpaperParameter(const LibraryItem& item, const std::stri
     }
 }
 
+EffectSettings Application::EffectsFor(const std::filesystem::path& source) const {
+    if (source.empty()) {
+        return {};
+    }
+    const auto& effects = config_.Data().effects;
+    const auto it = effects.find(WallpaperSettingsKey(MakePortablePath(source)));
+    return it == effects.end() ? EffectSettings{} : it->second;
+}
+
+void Application::SetWallpaperEffects(const LibraryItem& item, const EffectSettings& effects) {
+    if (effects == EffectSettings{}) {
+        config_.Data().effects.erase(item.id);
+    } else {
+        config_.Data().effects[item.id] = effects;
+    }
+    config_.MarkDirty();
+    const std::wstring key = PathKey(item.source);
+    for (auto& surface : surfaces_) {
+        if (PathKey(surface->Desc().source) == key) {
+            surface->SetEffects(effects);
+        }
+    }
+}
+
+void Application::ResetWallpaperEffects(const LibraryItem& item) {
+    SetWallpaperEffects(item, EffectSettings{});
+}
+
 void Application::ResetWallpaperParameters(const LibraryItem& item) {
     config_.ResetWallpaperParams(item.Ref());
     const std::wstring key = PathKey(item.source);
@@ -1435,9 +1478,12 @@ void Application::LogSessionStatistics() const {
         const double warmSeconds = static_cast<double>(GetTickCount64() - warmTickMs_) / 1000.0;
         if (warmSeconds >= 1.0) {
             const double cpuPerSecond = (processMs - warmCpuMs_) / warmSeconds;
-            log::Info(L"Regime etabli : {:.1f} s, {:.1f} FPS, CPU processus {:.1f} ms/s ({:.2f} % d'un coeur)",
-                      warmSeconds, static_cast<double>(framesRendered_ - warmFrames_) / warmSeconds, cpuPerSecond,
-                      cpuPerSecond / 10.0);
+            const double fps = static_cast<double>(framesRendered_ - warmFrames_) / warmSeconds;
+            log::Info(L"Regime etabli : {:.1f} s, {:.1f} FPS, CPU processus {:.1f} ms/s ({:.2f} % d'un coeur){}",
+                      warmSeconds, fps, cpuPerSecond, cpuPerSecond / 10.0,
+                      gpuSamples_ ? std::format(L", GPU 3D {:.2f} %, decodage video {:.2f} %",
+                                                gpuRenderSum_ / gpuSamples_, gpuDecodeSum_ / gpuSamples_)
+                                  : std::wstring());
         }
     }
 }

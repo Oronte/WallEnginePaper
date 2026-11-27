@@ -11,7 +11,7 @@ if [ ${#TARGETS[@]} -eq 0 ]; then
 fi
 "$EXE" --quit >/dev/null 2>&1; sleep 2
 for t in "${TARGETS[@]}"; do
-  "$EXE" --minimized --no-autopause --exit-after "$SECS" --wallpaper "$t"
+  "$EXE" --minimized --no-autopause --gpu-timing --exit-after "$SECS" --wallpaper "$t"
   line=$(grep "Regime etabli" "$LOG" | tail -1 | sed "s/.*Regime etabli : //")
   echo "$(basename "$t") | $line"
 done

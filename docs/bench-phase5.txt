@@ -1,0 +1,7 @@
+# Phase 5 - regime etabli (2 ecrans, 60 FPS, 7 s apres 5 s de chauffe, --gpu-timing : compteurs GPU Engine du processus)
+aurora.hlsl | 58.6 FPS, CPU 5.10 % d'un coeur, GPU 3D 4.23 %
+logo.png (souris en mouvement) | 58.7 FPS, CPU 4.67 %, GPU 3D 2.33 %
+Cars.mp4 (2560x1080) | 58.4 FPS, CPU 9.80 %, GPU 3D 5.68 %, decodage video 26.86 %
+# avec effets
+aurora.hlsl + aberration 30 %, bloom 50 %, vignettage 50 %, grain 25 %, pluie 90 % | 58.7 FPS, CPU 5.13 %, GPU 3D 7.47 %
+logo.png + vignettage 60 % (statique : boucle au repos) | 9.7 FPS, CPU 3.78 %, GPU 3D 0.00 %

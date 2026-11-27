@@ -7,12 +7,14 @@ void RunSpectrumAnalyzerTests();
 void RunBeatDetectorTests();
 void RunConfigTests();
 void RunControlTests();
+void RunEffectsTests();
 
 int main() {
     RunSpectrumAnalyzerTests();
     RunBeatDetectorTests();
     RunConfigTests();
     RunControlTests();
+    RunEffectsTests();
     std::printf("\n%s (%d echec(s))\n", lwe::test::g_failures == 0 ? "TOUS LES TESTS PASSENT" : "DES TESTS ECHOUENT",
                 lwe::test::g_failures);
     return lwe::test::g_failures == 0 ? 0 : 1;

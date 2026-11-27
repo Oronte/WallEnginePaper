@@ -16,6 +16,8 @@
 #include "input/InputForwarder.h"
 #include "render/RenderTexture.h"
 #include "render/TransitionRenderer.h"
+#include "render/EffectsRenderer.h"
+#include "effects/Interaction.h"
 #include "wallpaper/IWallpaperBackend.h"
 
 namespace lwe {
@@ -55,6 +57,9 @@ public:
     void AttachBackend(std::unique_ptr<IWallpaperBackend> backend, WallpaperDesc desc,
                        const TransitionRequest& transition = {});
     bool InTransition() const noexcept { return outgoing_ != nullptr; }
+
+    // Post-effets, particules et interaction souris du fond affiche (sans effet actif : aucun cout).
+    void SetEffects(const EffectSettings& effects);
     IWallpaperBackend* Backend() const noexcept { return backend_.get(); }
     const WallpaperDesc& Desc() const noexcept { return desc_; }
 
@@ -116,6 +121,15 @@ private:
 
     bool latencyTokenHeld_ = false;
     bool parallaxEnabled_ = true;
+    // Effets (effectsOn_ : textures pretes et au moins un effet actif).
+    EffectSettings effects_;
+    std::unique_ptr<EffectsRenderer> effectsRenderer_;
+    bool effectsOn_ = false;
+    float effectsTime_ = 0.0f;
+    RippleSet ripples_;
+    CursorTrail trail_;
+    bool PrepareEffects();
+
     std::filesystem::path capturePath_;
     uint32_t captureWidth_ = 0;
     bool paused_ = false;

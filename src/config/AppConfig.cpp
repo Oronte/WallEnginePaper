@@ -255,6 +255,88 @@ std::optional<uint32_t> KeyFromString(std::string_view text) {
 constexpr const char* kScheduleModeNames[] = {"timeSlots", "sun", "theme"};
 constexpr const char* kReducedMotionNames[] = {"auto", "on", "off"};
 
+constexpr const char* kEffectNames[kEffectCount] = {"chromatic", "blur", "bloom", "vignette", "grain", "scanlines"};
+constexpr const char* kOverlayNames[kOverlayCount] = {"none", "rain", "snow", "fireflies", "dust"};
+
+json EffectsToJson(const EffectSettings& e) {
+    json strength = json::object();
+    json order = json::array();
+    for (size_t i = 0; i < kEffectCount; ++i) {
+        strength[kEffectNames[i]] = e.strength[i];
+        order.push_back(kEffectNames[static_cast<size_t>(e.order[i])]);
+    }
+    return json{{"strength", std::move(strength)},
+                {"order", std::move(order)},
+                {"overlay", kOverlayNames[static_cast<size_t>(e.overlay)]},
+                {"overlayIntensity", e.overlayIntensity},
+                {"overlayAudio", e.overlayAudio},
+                {"overlayMouse", e.overlayMouse},
+                {"ripples", e.ripples},
+                {"rippleStrength", e.rippleStrength},
+                {"trail", e.trail},
+                {"trailColor", json::array({e.trailColor[0], e.trailColor[1], e.trailColor[2], e.trailColor[3]})}};
+}
+
+EffectSettings EffectsFromJson(const json& object) {
+    EffectSettings e;
+    if (!object.is_object()) {
+        return e;
+    }
+    if (const auto it = object.find("strength"); it != object.end() && it->is_object()) {
+        for (size_t i = 0; i < kEffectCount; ++i) {
+            ReadValue(*it, kEffectNames[i], e.strength[i]);
+        }
+    }
+    if (const auto it = object.find("order"); it != object.end() && it->is_array()) {
+        // Ordre valide seulement si c'est une permutation complete ; sinon ordre par defaut.
+        std::array<EffectId, kEffectCount> order{};
+        std::array<bool, kEffectCount> seen{};
+        size_t count = 0;
+        for (const auto& name : *it) {
+            if (!name.is_string() || count >= kEffectCount) {
+                break;
+            }
+            for (size_t i = 0; i < kEffectCount; ++i) {
+                if (name.get<std::string>() == kEffectNames[i] && !seen[i]) {
+                    seen[i] = true;
+                    order[count++] = static_cast<EffectId>(i);
+                }
+            }
+        }
+        if (count == kEffectCount) {
+            e.order = order;
+        }
+    }
+    std::string overlay;
+    ReadValue(object, "overlay", overlay);
+    for (size_t i = 0; i < kOverlayCount; ++i) {
+        if (overlay == kOverlayNames[i]) {
+            e.overlay = static_cast<OverlayType>(i);
+        }
+    }
+    ReadValue(object, "overlayIntensity", e.overlayIntensity);
+    ReadValue(object, "overlayAudio", e.overlayAudio);
+    ReadValue(object, "overlayMouse", e.overlayMouse);
+    ReadValue(object, "ripples", e.ripples);
+    ReadValue(object, "rippleStrength", e.rippleStrength);
+    ReadValue(object, "trail", e.trail);
+    if (const auto it = object.find("trailColor"); it != object.end()) {
+        ParamValue color;
+        if (ParamFromJson(*it, color) && std::holds_alternative<Color>(color)) {
+            e.trailColor = std::get<Color>(color);
+        }
+    }
+    const auto unit = [](float& v, float fallback) { v = std::clamp(std::isfinite(v) ? v : fallback, 0.0f, 1.0f); };
+    for (auto& s : e.strength) {
+        unit(s, 0.0f);
+    }
+    unit(e.overlayIntensity, 0.6f);
+    unit(e.overlayAudio, 0.5f);
+    unit(e.overlayMouse, 0.5f);
+    unit(e.rippleStrength, 0.5f);
+    return e;
+}
+
 json OptionalRefToJson(const WallpaperRef& ref) {
     return ref.Empty() ? json(nullptr) : RefToJson(ref);
 }
@@ -400,6 +482,25 @@ void ProfilesFromJson(const json& object, ProfileSettings& out) {
 }
 
 }  // namespace
+
+const char* ToString(EffectId effect) noexcept {
+    const auto index = static_cast<size_t>(effect);
+    return index < kEffectCount ? kEffectNames[index] : "chromatic";
+}
+
+const char* ToString(OverlayType overlay) noexcept {
+    const auto index = static_cast<size_t>(overlay);
+    return index < kOverlayCount ? kOverlayNames[index] : "none";
+}
+
+bool EffectSettings::Active() const noexcept {
+    return std::any_of(strength.begin(), strength.end(), [](float s) { return s > 0.0f; }) ||
+           overlay != OverlayType::None || ripples || trail;
+}
+
+bool EffectSettings::Animated() const noexcept {
+    return Strength(EffectId::Grain) > 0.0f || overlay != OverlayType::None;
+}
 
 const char* ToString(HotkeyAction action) noexcept {
     const auto index = static_cast<size_t>(action);
@@ -654,6 +755,11 @@ std::string SerializeConfig(const AppConfig& config) {
         settings[key] = std::move(values);
     }
     root["wallpaperSettings"] = std::move(settings);
+    json effects = json::object();
+    for (const auto& [key, value] : config.effects) {
+        effects[key] = EffectsToJson(value);
+    }
+    root["effects"] = std::move(effects);
 
     root["pause"] = {
         {"onFullscreenApp", config.pause.onFullscreenApp},
@@ -741,6 +847,11 @@ bool DeserializeConfig(std::string_view text, AppConfig& out, std::string& error
                 }
             }
             config.wallpaperSettings[key] = std::move(params);
+        }
+    }
+    if (const auto it = root.find("effects"); it != root.end() && it->is_object()) {
+        for (const auto& [key, value] : it->items()) {
+            config.effects[key] = EffectsFromJson(value);
         }
     }
     if (const auto it = root.find("pause"); it != root.end()) {

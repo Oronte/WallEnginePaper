@@ -173,6 +173,36 @@ struct ProfileSettings {
     static std::vector<Profile> DefaultProfiles();
 };
 
+// --- Effets superposables (par fond) ------------------------------------------------------------
+// Post-effets appliques a l'image finale (shader, video, image ; pas les fonds web qui s'affichent eux-memes).
+enum class EffectId : uint8_t { Chromatic, Blur, Bloom, Vignette, Grain, Scanlines };
+inline constexpr size_t kEffectCount = 6;
+enum class OverlayType : uint8_t { None, Rain, Snow, Fireflies, Dust };
+inline constexpr size_t kOverlayCount = 5;
+const char* ToString(EffectId effect) noexcept;
+const char* ToString(OverlayType overlay) noexcept;
+
+struct EffectSettings {
+    std::array<float, kEffectCount> strength{};  // 0 = desactive (aucun cout), 1 = fort
+    std::array<EffectId, kEffectCount> order{EffectId::Chromatic, EffectId::Blur,  EffectId::Bloom,
+                                             EffectId::Vignette,  EffectId::Grain, EffectId::Scanlines};
+    OverlayType overlay = OverlayType::None;
+    float overlayIntensity = 0.6f;
+    float overlayAudio = 0.5f;   // reaction aux graves / beats
+    float overlayMouse = 0.5f;   // reaction a la souris
+    bool ripples = false;        // ondulations au clic sur le bureau
+    float rippleStrength = 0.5f;
+    bool trail = false;          // trainee lumineuse derriere le curseur
+    Color trailColor{0.55f, 0.42f, 1.0f, 1.0f};
+
+    float Strength(EffectId effect) const noexcept { return strength[static_cast<size_t>(effect)]; }
+    // Au moins un effet, overlay ou interaction actif : sinon le fond est dessine directement, sans cout.
+    bool Active() const noexcept;
+    // Doit etre redessine a chaque image meme si le fond n'a pas change (grain, particules).
+    bool Animated() const noexcept;
+    bool operator==(const EffectSettings&) const = default;
+};
+
 // Integration systeme pour les fonds web (collectee seulement si une page s'abonne).
 struct IntegrationSettings {
     bool media = true;        // morceau en cours (controles multimedia de Windows)
@@ -195,6 +225,7 @@ struct AppConfig {
     WallpaperRef spanWallpaper;
     std::map<std::string, WallpaperRef> monitorWallpapers;  // cle = identifiant stable de l'ecran (UTF-8)
     std::map<std::string, ParamMap> wallpaperSettings;      // cle = WallpaperSettingsKey(source)
+    std::map<std::string, EffectSettings> effects;          // cle = WallpaperSettingsKey(source)
 
     PauseRules pause;
     AudioSettings audio;

@@ -56,6 +56,9 @@ public:
     virtual void ApplyWallpaper(const LibraryItem& item, const std::string& monitorId) = 0;  // "" = tous
     virtual void SetWallpaperParameter(const LibraryItem& item, const std::string& name, const ParamValue& value) = 0;
     virtual void ResetWallpaperParameters(const LibraryItem& item) = 0;
+    // Effets superposables du fond (post-effets, particules, ondulations, trainee).
+    virtual void SetWallpaperEffects(const LibraryItem& item, const EffectSettings& effects) = 0;
+    virtual void ResetWallpaperEffects(const LibraryItem& item) = 0;
     virtual void NextWallpaper() = 0;
     virtual void PreviousWallpaper() = 0;
     // Backend actuellement affiche pour ce fond (reglages des fonds web, qui n'ont pas d'apercu), ou nullptr.

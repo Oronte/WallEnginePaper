@@ -270,8 +270,17 @@ void MonitorContext::UpdatePointer(const GlobalPointerState& pointer, float delt
     if (pressedHere && !mouse_.pressed) {
         mouse_.clickX = mouse_.x;
         mouse_.clickY = mouse_.y;
+        if (effectsOn_ && effects_.ripples) {
+            ripples_.Add(mouse_.x, static_cast<float>(bufferHeight_) - mouse_.y);  // origine en haut a gauche
+        }
     }
     mouse_.pressed = pressedHere;
+    if (effectsOn_) {
+        ripples_.Advance(deltaSeconds);
+        if (effects_.trail) {
+            trail_.Update(mouse_.x, static_cast<float>(bufferHeight_) - mouse_.y, mouse_.inside, deltaSeconds);
+        }
+    }
 }
 
 SurfaceStatus MonitorContext::RenderFrame(const FrameTiming& timing, const AudioSpectrum& audio) {
@@ -302,7 +311,14 @@ SurfaceStatus MonitorContext::RenderFrame(const FrameTiming& timing, const Audio
             std::wstring error;
             if (target.Create(device_.Device(), bufferWidth_, bufferHeight_)) {
                 backend_->Invalidate();
-                backend_->Render(target.rtv.Get(), frame);
+                if (effectsOn_) {
+                    backend_->Render(effectsRenderer_->SceneTarget(), frame);
+                    EffectFrame effectFrame;
+                    effectFrame.time = effectsTime_;
+                    effectsRenderer_->Apply(target.rtv.Get(), effects_, effectFrame);
+                } else {
+                    backend_->Render(target.rtv.Get(), frame);
+                }
                 if (SaveTextureToPng(device_, target.texture.Get(), file, captureWidth_, error)) {
                     log::Info(L"Capture enregistree : {}", file.wstring());
                 } else {
@@ -344,6 +360,9 @@ SurfaceStatus MonitorContext::RenderFrame(const FrameTiming& timing, const Audio
         latencyTokenHeld_ = true;
     }
 
+    // Avec des effets, le fond (ou la transition) dessine dans la texture "scene" des effets.
+    const bool effects = effectsOn_ && effectsRenderer_ && effectsRenderer_->IsPrepared();
+    ID3D11RenderTargetView* sceneTarget = effects ? effectsRenderer_->SceneTarget() : renderTarget_.Get();
     bool finished = false;
     if (outgoing_) {
         // Les deux fonds dessinent dans leur texture (s'ils n'ont rien de neuf, la texture garde leur
@@ -352,12 +371,30 @@ SurfaceStatus MonitorContext::RenderFrame(const FrameTiming& timing, const Audio
         const float progress = std::clamp(transitionElapsed_ / std::max(transition_.seconds, 0.001f), 0.0f, 1.0f);
         outgoing_->Render(fromTexture_.rtv.Get(), frame);
         backend_->Render(toTexture_.rtv.Get(), frame);
-        transitionRenderer_->Draw(renderTarget_.Get(), fromTexture_.srv.Get(), toTexture_.srv.Get(), bufferWidth_,
+        transitionRenderer_->Draw(sceneTarget, fromTexture_.srv.Get(), toTexture_.srv.Get(), bufferWidth_,
                                   bufferHeight_, progress, transition_.type, transition_.seed);
         finished = progress >= 1.0f;
         ++transitionFrames_;
-    } else if (!backend_->Render(renderTarget_.Get(), frame)) {
-        return SurfaceStatus::Skipped;  // rien de neuf : l'ecran garde la derniere image, sans Present
+    } else {
+        const bool drew = backend_->Render(sceneTarget, frame);
+        // Grain, particules, ondulation ou trainee en cours : nouvelle image meme si le fond n'a pas change.
+        const bool animated = effects && (effects_.Animated() || !ripples_.Empty() || !trail_.Empty());
+        if (!drew && !animated) {
+            return SurfaceStatus::Skipped;  // rien de neuf : l'ecran garde la derniere image, sans Present
+        }
+    }
+    if (effects) {
+        effectsTime_ += frame.deltaTime;
+        EffectFrame effectFrame;
+        effectFrame.time = effectsTime_;
+        effectFrame.bass = frame.audio ? frame.audio->bass : 0.0f;
+        effectFrame.beat = frame.audio ? frame.audio->beat : 0.0f;
+        effectFrame.mouseX = mouse_.x;
+        effectFrame.mouseY = static_cast<float>(bufferHeight_) - mouse_.y;
+        effectFrame.mouseInside = mouse_.inside;
+        effectFrame.ripples = &ripples_;
+        effectFrame.trail = &trail_;
+        effectsRenderer_->Apply(renderTarget_.Get(), effects_, effectFrame);
     }
 
     // Intervalle 0 : la cadence est imposee par FrameLimiter ; en flip model fenetre, le DWM compose
@@ -400,6 +437,14 @@ void MonitorContext::SetPaused(bool globalPause, bool autoPause) {
     paused_ = paused;
     if (paused) {
         EndTransition();  // inutile de terminer un fondu que personne ne voit
+        if (effectsRenderer_) {
+            effectsRenderer_->Release();  // textures des effets rendues pendant la pause
+        }
+    } else if (effectsOn_ && effectsRenderer_ && !effectsRenderer_->IsPrepared()) {
+        effectsOn_ = PrepareEffects();
+        if (backend_) {
+            backend_->Invalidate();
+        }
     }
     if (backend_) {
         backend_->OnPauseChanged(paused);
@@ -408,6 +453,43 @@ void MonitorContext::SetPaused(bool globalPause, bool autoPause) {
         }
     }
     occluded_ = false;
+}
+
+bool MonitorContext::PrepareEffects() {
+    if (!effectsRenderer_) {
+        effectsRenderer_ = std::make_unique<EffectsRenderer>();
+    }
+    std::wstring error;
+    if (!effectsRenderer_->Prepare(device_, bufferWidth_, bufferHeight_, error)) {
+        log::Warn(L"Effets indisponibles sur « {} » : {}", info_.friendlyName, error);
+        effectsRenderer_->Release();
+        return false;
+    }
+    return true;
+}
+
+void MonitorContext::SetEffects(const EffectSettings& effects) {
+    effects_ = effects;
+    // Les fonds web s'affichent eux-memes (WebView2) : pas d'effets possibles.
+    bool wanted = effects.Active() && swapChain_ && (!backend_ || backend_->PresentsToSwapChain());
+    if (wanted && !paused_) {
+        wanted = PrepareEffects();
+    } else if (!wanted && effectsRenderer_) {
+        effectsRenderer_.reset();  // textures et shaders liberes
+    }
+    if (wanted != effectsOn_) {
+        log::Info(L"« {} » : effets {}", info_.friendlyName, wanted ? L"actives" : L"desactives");
+    }
+    effectsOn_ = wanted;
+    if (!effects.ripples) {
+        ripples_.Clear();
+    }
+    if (!effects.trail) {
+        trail_.Clear();
+    }
+    if (backend_) {
+        backend_->Invalidate();  // redessiner avec (ou sans) les nouveaux reglages
+    }
 }
 
 void MonitorContext::RequestCapture(std::filesystem::path file, uint32_t maxWidth) {

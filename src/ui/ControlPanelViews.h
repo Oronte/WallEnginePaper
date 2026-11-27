@@ -8,6 +8,8 @@
 #include <vector>
 
 #include "app/AppServices.h"
+#include "effects/Interaction.h"
+#include "render/EffectsRenderer.h"
 #include "render/RenderTexture.h"
 #include "render/TextureLoader.h"
 #include "ui/UiStyle.h"
@@ -48,6 +50,7 @@ private:
     void DrawCardContextMenu(const LibraryItem& item);
     void DrawDetails(float deltaSeconds);
     void DrawParameters(const LibraryItem& item);
+    void DrawEffects(const LibraryItem& item);
     void DrawScreens();
     void DrawPlaylist();
     void DrawSettings();
@@ -106,6 +109,11 @@ private:
     double previewTime_ = 0.0;
     uint64_t previewFrame_ = 0;
     MouseState previewMouse_;
+    // Effets dans l'apercu (memes reglages que le fond, cliquer dans l'apercu declenche les ondulations).
+    EffectsRenderer previewEffects_;
+    RippleSet previewRipples_;
+    CursorTrail previewTrail_;
+    float previewEffectsTime_ = 0.0f;
     AudioSpectrum silence_;       // miniatures : instantane sans son
     AudioSpectrum previewAudio_;  // apercu en direct : spectre courant
 

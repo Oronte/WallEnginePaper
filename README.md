@@ -25,6 +25,7 @@ L'exécutable : `build\vs2026\Release\WallEnginePaper.exe` (garder le dossier `a
 | `--no-autopause` | ignore les pauses plein écran / maximisé / batterie pour cette session (mesures) |
 | `--audio-debug` | force la capture audio et résume le signal chaque seconde dans le journal |
 | `--next-every <s>` | passe au fond suivant toutes les *s* secondes (tests des transitions ; modifie la config) |
+| `--gpu-timing` | ajoute l'utilisation GPU du processus (moteurs 3D et décodage vidéo, compteurs « GPU Engine ») à la ligne `Regime etabli` |
 | `--capture <png>` | enregistre une image du premier écran après `--capture-delay <s>` (4 s), réduite à `--capture-width <px>` (960 ; 0 = taille réelle) ; fonds web compris (WebView2 `CapturePreview`) |
 
 `tools/bench.sh [secondes] [fonds...]` lance chaque fond avec `--no-autopause --exit-after` et affiche la ligne
@@ -45,6 +46,27 @@ L'exécutable : `build\vs2026\Release\WallEnginePaper.exe` (garder le dossier `a
 - **Paramètres** : FPS (15/30/60/144 ou libre), qualité de rendu, transitions, raccourcis clavier, accessibilité,
   volume et sourdine, audio réactif, règles de pause automatique, démarrage avec Windows, dossiers de
   bibliothèque, dépannage, à propos.
+
+## Effets superposables et interaction
+
+Réglables **par fond** dans le panneau latéral de la Bibliothèque (*Effets et interaction*, avec réinitialisation)
+et visibles en direct dans l'aperçu (cliquer dans l'aperçu déclenche une ondulation). Shaders, vidéos et images ;
+pas les fonds web (WebView2 compose lui-même son contenu).
+
+- **Post-effets**, appliqués dans l'ordre choisi (flèches haut / bas) : aberration chromatique, flou gaussien
+  (deux passes séparables), bloom (seuil doux, mi-résolution), vignettage, grain film, lignes de balayage.
+- **Particules** dessinées par-dessus, procédurales (aucun tampon de particules) : pluie sur vitre (gouttes en
+  lentille qui réfractent le fond, reflet, bord sombre, gouttes qui glissent), neige, lucioles, poussière dans des
+  rayons de lumière. Réaction au son (graves, beats) et à la souris (la neige s'écarte, les lucioles sont
+  attirées, la poussière tourbillonne, la pluie s'efface sous le curseur), réglables.
+- **Souris** : ondulations au clic sur le bureau (déformation radiale de l'image finale, 8 au plus, 1,6 s) et
+  traînée lumineuse qui suit le curseur (couleur réglable), à partir de `InputForwarder`.
+- **Coût** : sans aucun effet, le fond est dessiné directement dans la swap chain (zéro passe, zéro texture).
+  Avec effets : le fond dessine dans une texture de scène (jamais écrasée, pour qu'une image fixe n'ait pas à être
+  redessinée), chaque effet actif ajoute une passe plein écran, puis une passe finale écrit dans la swap chain.
+  Un effet statique (ex. vignettage sur une image) garde la boucle au repos ; grain et particules redessinent
+  à chaque image. Textures libérées en pause. Mesuré : aurora 4,2 % → 7,5 % de GPU avec aberration, bloom,
+  vignettage, grain et pluie (`docs/bench-phase5.txt`).
 
 ## Contrôle et confort
 
@@ -182,7 +204,9 @@ src/
   input/InputForwarder.*       Curseur global sans hook
   library/Library.*            Catalogue local (assets, fonds importés, dossiers, project.json)
   render/                      Device D3D11 partagé, FrameLimiter, RenderTexture, TextureLoader (WIC),
-                               TransitionRenderer (shader de transition), TextureWriter (captures PNG)
+                               TransitionRenderer (shader de transition), TextureWriter (captures PNG),
+                               EffectsRenderer (post-effets, particules, ondulations, traînée)
+  effects/Interaction.*        Ondulations et traînée du curseur (logique pure)
   system/Autostart.*           Clé Run de l'utilisateur
   system/SystemInfo.*          Thème clair/sombre, animations Windows, couleur d'accent, application au premier plan
   system/MediaSession.*        Morceau en cours (SMTC, C++/WinRT) ; system/SystemStats.* CPU, RAM, GPU (PDH), batterie
@@ -245,6 +269,8 @@ nombre de beats, charleston ignoré), décroissance de l'intensité, silence, br
 du tempo, sensibilité. `LWE_BEAT_TRACE=1` affiche la nouveauté et le seuil image par image.
 `tests/ConfigTest.cpp` : aller-retour JSON des nouveaux réglages, ancien `config.json` (valeurs par défaut),
 valeurs aberrantes bornées, transition aléatoire toujours concrète.
+`tests/EffectsTest.cpp` : activité et animation des réglages d'effets, aller-retour JSON, ordre invalide remplacé,
+ondulations (8 au plus, durée de vie) et traînée (espacement, 24 points, effacement).
 `tests/ControlTest.cpp` : lever / coucher du soleil (Paris été / hiver, New York, Sydney, Tromsø polaire),
 plages horaires (passage de minuit, trou, fin exclue), modes soleil et thème, format et lecture des raccourcis,
 correspondance d'exécutable, priorité des profils, réglages effectifs (profil, animations réduites).
