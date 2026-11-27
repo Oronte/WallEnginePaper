@@ -22,8 +22,8 @@ namespace lwe {
 //
 // API exposee a la page : window.wallEnginePaper
 //   .mouse { x, y, nx, ny, inside }   .audio (Float32Array(64))   .audioLevel   .audioBands { bass, mid, treble }
-//   .bpm   .beat   .params {...}   .volume  .paused
-//   .on('mouse' | 'audio' | 'beat' | 'params' | 'pause', callback)
+//   .bpm   .beat   .params {...}   .volume  .paused   .media {...}   .system {...}   .theme { dark, accent }
+//   .on('mouse' | 'audio' | 'beat' | 'params' | 'pause' | 'media' | 'system' | 'theme', callback)
 // Les icones du bureau captant la souris, les mouvements et clics sont aussi rejoues dans la page sous
 // forme d'evenements pointermove / mousemove / mousedown / mouseup / click.
 //
@@ -47,6 +47,9 @@ public:
 
     void OnPauseChanged(bool paused) override;
     void SetAudioOutput(float volume, bool muted) override;
+    uint32_t SystemTopics() const override { return topics_; }
+    void PushSystemData(const SystemSnapshot& snapshot) override;
+    bool CapturePreview(const std::filesystem::path& file, uint32_t maxWidth) override;
     bool HasFailed(std::wstring& error) const override;
 
     static bool RuntimeAvailable();
@@ -90,6 +93,11 @@ private:
     bool lastDown_ = false;
     bool lastInside_ = false;
     uint32_t lastBeatCount_ = UINT32_MAX;
+    uint32_t topics_ = 0;            // sujets demandes par la page (wep.on('media' | 'system'))
+    uint64_t sentMediaSerial_ = 0;   // derniers envois (0 : rien envoye depuis le chargement)
+    uint64_t sentTrackSerial_ = 0;
+    uint64_t sentStatsSerial_ = 0;
+    uint64_t sentThemeSerial_ = 0;
 };
 
 }  // namespace lwe

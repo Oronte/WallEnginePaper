@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Widgets</title>
+<style>
+  :root { --accent: #8c62ff; --accent-rgb: 140, 98, 255; --bg: #08080e; --fg: #f2f2f7; --dim: rgba(242,242,247,0.55);
+          --track: rgba(255,255,255,0.09); }
+  :root.light { --bg: #eef0f6; --fg: #15151c; --dim: rgba(21,21,28,0.55); --track: rgba(0,0,0,0.08); }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg);
+               font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; transition: background 1s, color 1s; }
+  .glow { position: fixed; width: 70vmax; height: 70vmax; border-radius: 50%; filter: blur(90px); opacity: 0.35;
+          background: radial-gradient(circle, rgba(var(--accent-rgb), 0.9), transparent 65%);
+          animation: drift 40s ease-in-out infinite alternate; }
+  .glow.two { background: radial-gradient(circle, rgba(70, 160, 255, 0.7), transparent 65%); animation-duration: 55s;
+              animation-direction: alternate-reverse; right: -20vmax; bottom: -30vmax; }
+  @keyframes drift { from { transform: translate(-15vmax, -20vmax); } to { transform: translate(25vmax, 10vmax); } }
+  .clock { position: fixed; left: 7vw; top: 12vh; }
+  .time { font-size: 17vh; font-weight: 300; letter-spacing: -0.02em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .seconds { font-size: 5vh; color: var(--dim); margin-left: 1vh; }
+  .date { font-size: 3.2vh; color: var(--dim); margin-top: 1.5vh; text-transform: capitalize; }
+  .stats { position: fixed; left: 7vw; bottom: 10vh; display: flex; gap: 3.5vw; }
+  .gauge { width: 15vh; text-align: center; }
+  .gauge svg { width: 15vh; height: 15vh; transform: rotate(-90deg); }
+  .gauge circle { fill: none; stroke-width: 8; }
+  .gauge .track { stroke: var(--track); }
+  .gauge .value { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset 0.9s ease, stroke 1s; }
+  .gauge .number { position: relative; top: -10.2vh; height: 0; font-size: 3.4vh; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .gauge .label { margin-top: 1vh; font-size: 1.7vh; letter-spacing: 0.22em; text-transform: uppercase; color: var(--dim); }
+  .gauge .detail { font-size: 1.5vh; color: var(--dim); margin-top: 0.3vh; font-variant-numeric: tabular-nums; }
+  .gauge.off { display: none; }
+  .waiting { position: fixed; left: 7vw; bottom: 6vh; font-size: 1.6vh; color: var(--dim); }
+</style>
+</head>
+<body>
+  <div class="glow"></div>
+  <div class="glow two"></div>
+  <div class="clock">
+    <div class="time"><span id="hm">--:--</span><span class="seconds" id="sec"></span></div>
+    <div class="date" id="date"></div>
+  </div>
+  <div class="stats" id="stats"></div>
+  <div class="waiting" id="waiting">En attente des statistiques…</div>
+<script>
+(() => {
+  const wep = window.wallEnginePaper;
+  const settings = { showSeconds: true, h24: true, showGpu: true, showBattery: true };
+  const R = 52, C = 2 * Math.PI * R;
+  const gauges = {};
+
+  function gauge(key, label) {
+    const el = document.createElement('div');
+    el.className = 'gauge off';
+    el.innerHTML = `<svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="${R}"/>` +
+                   `<circle class="value" cx="60" cy="60" r="${R}" stroke-dasharray="${C}" stroke-dashoffset="${C}"/></svg>` +
+                   `<div class="number">–</div><div class="label">${label}</div><div class="detail"></div>`;
+    document.getElementById('stats').appendChild(el);
+    gauges[key] = { el, value: el.querySelector('.value'), number: el.querySelector('.number'), detail: el.querySelector('.detail') };
+  }
+  gauge('cpu', 'Processeur');
+  gauge('ram', 'Mémoire');
+  gauge('gpu', 'Graphique');
+  gauge('battery', 'Batterie');
+
+  function set(key, percent, detail, visible = true) {
+    const g = gauges[key];
+    g.el.classList.toggle('off', !visible || percent === null || percent === undefined);
+    if (!visible || percent === null || percent === undefined) return;
+    const p = Math.max(0, Math.min(100, percent));
+    g.value.style.strokeDashoffset = (C * (1 - p / 100)).toFixed(1);
+    g.value.style.stroke = p > 90 ? '#ff6b6b' : '';
+    g.number.textContent = Math.round(p) + '%';
+    g.detail.textContent = detail || '';
+  }
+
+  // Horloge : mise a jour a chaque seconde, independante des statistiques.
+  const dateFormat = new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  function tick() {
+    const now = new Date();
+    let h = now.getHours();
+    const suffix = settings.h24 ? '' : (h >= 12 ? ' PM' : ' AM');
+    if (!settings.h24) h = h % 12 || 12;
+    document.getElementById('hm').textContent = String(h).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0') + suffix;
+    document.getElementById('sec').textContent = settings.showSeconds ? String(now.getSeconds()).padStart(2, '0') : '';
+    document.getElementById('date').textContent = dateFormat.format(now);
+    setTimeout(tick, 1000 - now.getMilliseconds() + 5);
+  }
+  tick();
+
+  wep.on('system', s => {
+    document.getElementById('waiting').style.display = 'none';
+    set('cpu', s.cpu);
+    set('ram', s.ram.percent, `${s.ram.used.toFixed(1)} / ${s.ram.total.toFixed(0)} Go`);
+    const vram = s.vram ? `${s.vram.used.toFixed(1)}${s.vram.total ? ' / ' + s.vram.total.toFixed(0) : ''} Go` : '';
+    set('gpu', s.gpu, vram, settings.showGpu);
+    set('battery', s.battery ? s.battery.percent : null, s.battery && s.battery.charging ? 'en charge' : '', settings.showBattery);
+  });
+  wep.on('theme', t => {
+    document.documentElement.classList.toggle('light', !t.dark);
+    document.documentElement.style.setProperty('--accent', t.accent);
+    document.documentElement.style.setProperty('--accent-rgb', t.accentRgb.join(', '));
+  });
+  wep.on('params', p => Object.assign(settings, p));
+})();
+</script>
+</body>
+</html>

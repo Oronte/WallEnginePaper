@@ -1806,6 +1806,15 @@ void ControlPanelViews::DrawSettings() {
                 "réglage « Afficher les animations dans Windows ».");
     }
 
+    section(icon::kGlobe, "Intégration système (fonds web)");
+    {
+        bool integrationChanged = ImGui::Checkbox("Morceau en cours (titre, artiste, pochette)", &config.integration.media);
+        integrationChanged |= ImGui::Checkbox("Statistiques système (CPU, RAM, GPU, batterie)", &config.integration.systemStats);
+        dirty |= integrationChanged;
+        DimText("Lus localement par Windows (contrôles multimédia, compteurs de performance), uniquement quand un fond "
+                "web s'y abonne (wep.on('media'), wep.on('system')). Rien ne quitte le PC.");
+    }
+
     section(icon::kVolume, "Audio");
     bool muted = config.audio.muted;
     if (ImGui::Checkbox("Couper le son des fonds d'écran", &muted)) {

@@ -173,6 +173,12 @@ struct ProfileSettings {
     static std::vector<Profile> DefaultProfiles();
 };
 
+// Integration systeme pour les fonds web (collectee seulement si une page s'abonne).
+struct IntegrationSettings {
+    bool media = true;        // morceau en cours (controles multimedia de Windows)
+    bool systemStats = true;  // CPU, RAM, GPU, batterie
+};
+
 // Accessibilite : "Afficher les animations dans Windows" (SPI_GETCLIENTAREAANIMATION).
 enum class ReducedMotion : uint8_t { Auto, On, Off };
 
@@ -198,6 +204,7 @@ struct AppConfig {
     ScheduleSettings schedule;
     ProfileSettings profiles;
     ReducedMotion reducedMotion = ReducedMotion::Auto;
+    IntegrationSettings integration;
     bool startWithWindows = true;
     std::vector<std::filesystem::path> libraryFolders;
 

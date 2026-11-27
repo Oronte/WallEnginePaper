@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Now Playing</title>
+<style>
+  :root { --accent: #8c62ff; --accent-rgb: 140, 98, 255; --blur: 60px; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #07070c; color: #f2f2f7;
+               font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif; }
+  .backdrop { position: fixed; inset: -10%; background-size: cover; background-position: center;
+              filter: blur(var(--blur)) saturate(1.5) brightness(0.5); transform: scale(1.1);
+              opacity: 0; transition: opacity 1.6s ease; }
+  .backdrop.visible { opacity: 1; }
+  .fallback { position: fixed; inset: 0;
+              background: radial-gradient(ellipse at 30% 30%, rgba(var(--accent-rgb), 0.35), transparent 60%),
+                          radial-gradient(ellipse at 80% 80%, rgba(60, 140, 255, 0.25), transparent 55%), #07070c; }
+  .vignette { position: fixed; inset: 0; background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.55)); }
+  .card { position: fixed; left: 8vw; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 4vw;
+          max-width: 84vw; }
+  .art { width: 30vh; height: 30vh; border-radius: 18px; background: rgba(255,255,255,0.06) center / cover no-repeat;
+         box-shadow: 0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.08);
+         transition: transform 0.12s ease-out, background-image 0.6s ease; flex: none; }
+  .art.noart { background-image: linear-gradient(135deg, rgba(var(--accent-rgb), 0.65), rgba(47, 182, 255, 0.35)) !important;
+               display: flex; align-items: center; justify-content: center; font-size: 12vh; color: rgba(255,255,255,0.75); }
+  .art.noart::after { content: "\266A"; }
+  .meta { min-width: 0; }
+  .app { font-size: 1.6vh; letter-spacing: 0.25em; text-transform: uppercase; color: rgba(255,255,255,0.55); }
+  .title { font-size: 6.2vh; font-weight: 700; line-height: 1.05; margin: 1.2vh 0 0.8vh; white-space: nowrap;
+           overflow: hidden; text-overflow: ellipsis; max-width: 55vw; text-shadow: 0 4px 30px rgba(0,0,0,0.4); }
+  .artist { font-size: 3vh; color: rgba(255,255,255,0.85); }
+  .album { font-size: 2.2vh; color: rgba(255,255,255,0.55); margin-top: 0.4vh; }
+  .progress { margin-top: 3vh; width: 40vw; max-width: 640px; }
+  .bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,0.14); overflow: hidden; }
+  .fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), #6fb6ff); border-radius: 3px; }
+  .times { display: flex; justify-content: space-between; font-size: 1.7vh; color: rgba(255,255,255,0.55);
+           margin-top: 0.8vh; font-variant-numeric: tabular-nums; }
+  .state { display: inline-block; margin-left: 0.6em; color: var(--accent); }
+  .idle { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 2.4vh;
+          letter-spacing: 0.3em; text-transform: uppercase; color: rgba(255,255,255,0.35); opacity: 0;
+          transition: opacity 1s ease; }
+  .idle.visible { opacity: 1; }
+  .hidden { opacity: 0; transition: opacity 0.8s ease; }
+  .shown { opacity: 1; transition: opacity 0.8s ease; }
+  canvas { position: fixed; left: 0; right: 0; bottom: 0; width: 100%; height: 24vh; }
+</style>
+</head>
+<body>
+  <div class="fallback"></div>
+  <div class="backdrop" id="backdropA"></div>
+  <div class="backdrop" id="backdropB"></div>
+  <div class="vignette"></div>
+  <canvas id="spectrum"></canvas>
+  <div class="card hidden" id="card">
+    <div class="art" id="art"></div>
+    <div class="meta">
+      <div class="app" id="app"></div>
+      <div class="title" id="title"></div>
+      <div class="artist" id="artist"></div>
+      <div class="album" id="album"></div>
+      <div class="progress" id="progress">
+        <div class="bar"><div class="fill" id="fill"></div></div>
+        <div class="times"><span id="elapsed">0:00</span><span><span id="duration">0:00</span><span class="state" id="state"></span></span></div>
+      </div>
+    </div>
+  </div>
+  <div class="idle" id="idle">Aucune lecture en cours</div>
+<script>
+(() => {
+  const wep = window.wallEnginePaper;
+  const $ = id => document.getElementById(id);
+  const settings = { blur: 60, showSpectrum: true, showProgress: true, beatPulse: 0.6, demo: false };
+  const backdrops = [$('backdropA'), $('backdropB')];
+  let front = 0;
+  let artwork = '';
+
+  const fmt = s => {
+    if (!isFinite(s) || s < 0) return '0:00';
+    s = Math.floor(s);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(r).padStart(2, '0');
+  };
+  const appName = id => {
+    if (!id) return '';
+    const name = id.split('!').pop().split('\\').pop().replace(/\.exe$/i, '');
+    return name.length > 30 ? name.slice(0, 30) : name;
+  };
+
+  function showArtwork(url) {
+    if (url === artwork) return;
+    artwork = url;
+    $('art').style.backgroundImage = url ? `url("${url}")` : 'none';
+    $('art').classList.toggle('noart', !url);
+    // Fondu croise entre deux arriere-plans flous.
+    const next = backdrops[1 - front];
+    next.style.backgroundImage = url ? `url("${url}")` : 'none';
+    next.classList.toggle('visible', !!url);
+    backdrops[front].classList.remove('visible');
+    front = 1 - front;
+  }
+
+  function render(m) {
+    const active = m.available && (m.title || m.artist);
+    $('card').className = 'card ' + (active ? 'shown' : 'hidden');
+    $('idle').classList.toggle('visible', !active);
+    if (!active) { showArtwork(''); return; }
+    $('app').textContent = appName(m.app);
+    $('title').textContent = m.title || 'Sans titre';
+    $('artist').textContent = m.artist || '';
+    $('album').textContent = m.album || '';
+    $('state').textContent = m.playing ? '▶' : '❚❚';
+    $('duration').textContent = fmt(m.duration);
+    showArtwork(m.artwork || '');
+  }
+
+  // Demonstration : morceau fictif, pochette generee, spectre synthetique (apercu sans musique).
+  let demoArt = '';
+  function demoMedia() {
+    if (!demoArt) {
+      const c = document.createElement('canvas');
+      c.width = c.height = 512;
+      const g = c.getContext('2d');
+      const grad = g.createLinearGradient(0, 0, 512, 512);
+      grad.addColorStop(0, '#ff5f9e'); grad.addColorStop(0.5, '#8c62ff'); grad.addColorStop(1, '#2fb6ff');
+      g.fillStyle = grad; g.fillRect(0, 0, 512, 512);
+      for (let i = 0; i < 9; i++) {
+        g.strokeStyle = 'rgba(255,255,255,' + (0.08 + i * 0.04) + ')';
+        g.lineWidth = 10;
+        g.beginPath(); g.arc(256, 256, 40 + i * 26, 0, Math.PI * 2); g.stroke();
+      }
+      demoArt = c.toDataURL('image/png');
+    }
+    return { available: true, title: 'Midnight Circuit', artist: 'WallEnginePaper', album: 'Démonstration',
+             app: 'Demo.exe', playing: true, position: 83, duration: 214, artwork: demoArt };
+  }
+  function currentMedia() { return settings.demo ? demoMedia() : wep.media; }
+
+  function tickProgress() {
+    const m = currentMedia();
+    if (settings.demo) {
+      m.position = 83 + (performance.now() / 1000) % 120;
+    }
+    const visible = settings.showProgress && m.duration > 0;
+    $('progress').style.display = visible ? '' : 'none';
+    if (visible) {
+      const pos = settings.demo ? m.position : wep.mediaPosition();
+      $('fill').style.width = (100 * pos / m.duration).toFixed(2) + '%';
+      $('elapsed').textContent = fmt(pos);
+    }
+  }
+  setInterval(tickProgress, 500);
+
+  // Spectre : barres en miroir depuis le centre, couleur d'accent ; rien n'est dessine en silence.
+  const canvas = $('spectrum');
+  const ctx = canvas.getContext('2d');
+  const smooth = new Float32Array(64);
+  function resize() {
+    canvas.width = Math.round(canvas.clientWidth * devicePixelRatio);
+    canvas.height = Math.round(canvas.clientHeight * devicePixelRatio);
+  }
+  addEventListener('resize', resize);
+  resize();
+  let pulse = 0;
+  let lastFrame = performance.now();
+  let drewSomething = true;
+  function frame(now) {
+    const dt = Math.min(0.1, (now - lastFrame) / 1000);
+    lastFrame = now;
+    pulse = Math.max(0, pulse - dt * 4);
+    $('art').style.transform = `scale(${1 + 0.035 * settings.beatPulse * pulse}) translate(${wep.mouse.nx * 6}px, ${-wep.mouse.ny * 6}px)`;
+    let energy = 0;
+    for (let i = 0; i < 64; i++) {
+      const target = settings.demo ? (0.55 + 0.35 * Math.sin(now / 300 + i * 0.35)) * Math.exp(-i / 40) : wep.audio[i];
+      smooth[i] += (target - smooth[i]) * Math.min(1, dt * 18);
+      energy += smooth[i];
+    }
+    if (settings.showSpectrum && (energy > 0.01 || drewSomething)) {
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      drewSomething = energy > 0.01;
+      const count = 48, gap = w / (count * 2 + 2), bar = gap * 0.62;
+      const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent-rgb');
+      for (let i = 0; i < count; i++) {
+        const v = smooth[Math.floor(i * 60 / count)];
+        const bh = Math.max(2, v * h * 0.9);
+        const alpha = 0.25 + 0.6 * v;
+        ctx.fillStyle = `rgba(${accent}, ${alpha})`;
+        for (const side of [-1, 1]) {
+          const x = w / 2 + side * (i + 0.5) * gap - bar / 2;
+          ctx.beginPath();
+          ctx.roundRect(x, h - bh, bar, bh, bar / 2);
+          ctx.fill();
+        }
+      }
+    } else if (!settings.showSpectrum && drewSomething) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drewSomething = false;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  wep.on('media', m => { if (!settings.demo) render(m); });
+  wep.on('beat', () => { pulse = 1; });
+  wep.on('theme', t => {
+    document.documentElement.style.setProperty('--accent', t.accent);
+    document.documentElement.style.setProperty('--accent-rgb', t.accentRgb.join(', '));
+  });
+  wep.on('params', p => {
+    Object.assign(settings, p);
+    document.documentElement.style.setProperty('--blur', settings.blur + 'px');
+    drewSomething = true;
+    render(currentMedia());
+  });
+  render(wep.media);
+})();
+</script>
+</body>
+</html>

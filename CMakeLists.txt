@@ -76,6 +76,8 @@ set(LWE_SOURCES
     src/render/RenderTexture.cpp
     src/render/TransitionRenderer.h
     src/render/TransitionRenderer.cpp
+    src/render/TextureWriter.h
+    src/render/TextureWriter.cpp
     src/render/TextureLoader.h
     src/render/TextureLoader.cpp
 
@@ -91,12 +93,17 @@ set(LWE_SOURCES
     src/system/Autostart.h
     src/system/SystemInfo.h
     src/system/SystemInfo.cpp
+    src/system/MediaSession.h
+    src/system/MediaSession.cpp
+    src/system/SystemStats.h
+    src/system/SystemStats.cpp
     src/system/Autostart.cpp
 
     src/watchdog/PerformanceWatchdog.h
     src/watchdog/PerformanceWatchdog.cpp
 
     src/wallpaper/IWallpaperBackend.h
+    src/wallpaper/SystemData.h
     src/wallpaper/WallpaperFactory.h
     src/wallpaper/WallpaperFactory.cpp
     src/wallpaper/shader/ShaderBackend.h
@@ -158,7 +165,7 @@ target_link_libraries(WallEnginePaper PRIVATE
     lwe::imgui
     d3d11 dxgi d3dcompiler dxguid dwmapi windowscodecs
     mfplat mfuuid mfreadwrite
-    user32 gdi32 shell32 ole32 uuid advapi32 shcore wtsapi32 ksuser
+    user32 gdi32 shell32 ole32 uuid advapi32 shcore wtsapi32 ksuser pdh windowsapp
 )
 target_compile_definitions(WallEnginePaper PRIVATE LWE_HAS_IMGUI=1)
 

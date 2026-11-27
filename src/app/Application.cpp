@@ -1,6 +1,8 @@
 #include "app/Application.h"
 
+#include <dxgi.h>
 #include <mfapi.h>
+#include <wrl/client.h>
 #include <shellapi.h>
 #include <wtsapi32.h>
 
@@ -107,6 +109,13 @@ CommandLineOptions ParseCommandLine() {
             options.minimized = true;
         } else if (arg == L"--exit-after" && i + 1 < argc) {
             options.exitAfterSeconds = std::wcstod(argv[++i], nullptr);
+        } else if (arg == L"--capture" && i + 1 < argc) {
+            std::error_code ec;
+            options.capturePath = std::filesystem::absolute(argv[++i], ec);
+        } else if (arg == L"--capture-delay" && i + 1 < argc) {
+            options.captureDelaySeconds = std::wcstod(argv[++i], nullptr);
+        } else if (arg == L"--capture-width" && i + 1 < argc) {
+            options.captureWidth = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
         } else if (arg == L"--next-every" && i + 1 < argc) {
             options.nextEverySeconds = std::wcstod(argv[++i], nullptr);
         } else if (arg == L"--no-autopause") {
@@ -197,7 +206,7 @@ bool Application::Initialize() {
     audioCapture_.SetSmoothing(config_.Data().audio.attackMs, config_.Data().audio.releaseMs);
     autostart::Sync(config_.Data().startWithWindows);
     systemAnimations_ = systeminfo::ClientAreaAnimationsEnabled();
-    lightTheme_ = systeminfo::AppsUseLightTheme();
+    RefreshTheme();
     RefreshEffectiveSettings(config_.Data().profiles.active);
     limiter_.SetTargetFps(effective_.fpsLimit);
     uiLimiter_.SetTargetFps(kUiFps);
@@ -330,6 +339,8 @@ void Application::Shutdown() {
     running_ = false;
     LogSessionStatistics();
     audioCapture_.SetEnabled(false);
+    media_.SetEnabled(false);
+    stats_.Stop();
 
     if (controlWindow_) {
         KillTimer(controlWindow_, kTimerMaintenance);
@@ -474,8 +485,8 @@ void Application::RebuildSurfaces() {
 
         WallpaperDesc desc;
         if (!options_.wallpaperOverride.empty()) {
-            desc.type = GuessWallpaperType(options_.wallpaperOverride).value_or(WallpaperType::Shader);
-            desc.source = options_.wallpaperOverride;
+            desc = config_.Resolve(WallpaperRef{
+                GuessWallpaperType(options_.wallpaperOverride).value_or(WallpaperType::Shader), options_.wallpaperOverride});
         } else {
             desc = config_.Resolve(AssignedWallpaper(surface->Info()));
         }
@@ -743,6 +754,12 @@ void Application::MaintenanceTick() {
         }
     }
     ReplaceFailedBackends();
+    if (!options_.capturePath.empty() && !options_.captureDone && !surfaces_.empty() &&
+        static_cast<double>(GetTickCount64() - startTickMs_) / 1000.0 >= options_.captureDelaySeconds) {
+        options_.captureDone = true;
+        surfaces_.front()->RequestCapture(options_.capturePath, options_.captureWidth);
+    }
+    SystemFeedsTick();
     ScheduleTick(false);
     PlaylistTick();
     if (options_.nextEverySeconds > 0.0 &&
@@ -1208,6 +1225,57 @@ void Application::ScheduleTick(bool force) {
     }
 }
 
+void Application::RefreshTheme() {
+    lightTheme_ = systeminfo::AppsUseLightTheme();
+    ThemeInfo theme;
+    theme.dark = !lightTheme_;
+    theme.accent = systeminfo::AccentColor();
+    if (themeSerial_ == 0 || theme.dark != theme_.dark || theme.accent != theme_.accent) {
+        theme_ = theme;
+        ++themeSerial_;
+    }
+}
+
+void Application::SystemFeedsTick() {
+    uint32_t topics = 0;
+    for (const auto& surface : surfaces_) {
+        if (surface->Backend() && !surface->IsPaused()) {
+            topics |= surface->Backend()->SystemTopics();
+        }
+    }
+    const IntegrationSettings& integration = config_.Data().integration;
+    media_.SetEnabled(integration.media && (topics & kTopicMedia) != 0 && !shutDown_);
+    if (media_.IsEnabled()) {
+        mediaSerial_ = media_.Snapshot(mediaInfo_);
+    }
+    if (integration.systemStats && (topics & kTopicSystem) != 0) {
+        if (!stats_.IsRunning()) {
+            Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+            Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+            if (device_.IsValid() && SUCCEEDED(device_.Device()->QueryInterface(IID_PPV_ARGS(&dxgiDevice)))) {
+                dxgiDevice->GetAdapter(&adapter);
+            }
+            stats_.Start(adapter.Get());
+        }
+        stats_.Sample(statsInfo_);
+        ++statsSerial_;
+    } else {
+        stats_.Stop();
+    }
+    SystemSnapshot snapshot;
+    snapshot.media = &mediaInfo_;
+    snapshot.mediaSerial = mediaSerial_;
+    snapshot.stats = &statsInfo_;
+    snapshot.statsSerial = statsSerial_;
+    snapshot.theme = theme_;
+    snapshot.themeSerial = themeSerial_;
+    for (auto& surface : surfaces_) {
+        if (surface->Backend() && !surface->IsPaused()) {
+            surface->Backend()->PushSystemData(snapshot);
+        }
+    }
+}
+
 void Application::ApplyHotkeys() {
     config_.MarkDirty();
     hotkeys_.Apply(controlWindow_, config_.Data().hotkeys);
@@ -1534,14 +1602,18 @@ LRESULT Application::WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
             systemAnimations_ = systeminfo::ClientAreaAnimationsEnabled();
             RefreshEffectiveSettings(effective_.profile);
         } else if (systeminfo::IsThemeChangeMessage(lParam)) {
-            const bool light = systeminfo::AppsUseLightTheme();
-            if (light != lightTheme_) {
-                lightTheme_ = light;
-                log::Info(L"Theme Windows : {}", light ? L"clair" : L"sombre");
+            const bool wasLight = lightTheme_;
+            RefreshTheme();
+            if (wasLight != lightTheme_) {
+                log::Info(L"Theme Windows : {}", lightTheme_ ? L"clair" : L"sombre");
                 ScheduleTick(false);
             }
         }
         return DefWindowProcW(window, message, wParam, lParam);
+
+    case WM_DWMCOLORIZATIONCOLORCHANGED:
+        RefreshTheme();
+        return 0;
 
     case WM_DISPLAYCHANGE:
     case WM_DPICHANGED:

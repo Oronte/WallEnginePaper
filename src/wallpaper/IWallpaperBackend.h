@@ -6,11 +6,13 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "config/AppConfig.h"
+#include "wallpaper/SystemData.h"
 
 namespace lwe {
 
@@ -115,6 +117,13 @@ public:
 
     // Volume / sourdine globaux (Parametres > Audio), pour les fonds qui produisent du son.
     virtual void SetAudioOutput(float /*volume*/, bool /*muted*/) {}
+
+    // Donnees systeme (morceau en cours, statistiques, theme) : sujets demandes par le fond (SystemTopic),
+    // puis instantane pousse une fois par seconde (le theme est toujours fourni).
+    virtual uint32_t SystemTopics() const { return 0; }
+    // Fonds qui s'affichent eux-memes (web) : capture asynchrone de leur contenu en PNG (--capture).
+    virtual bool CapturePreview(const std::filesystem::path& /*file*/, uint32_t /*maxWidth*/) { return false; }
+    virtual void PushSystemData(const SystemSnapshot& /*snapshot*/) {}
 
     // Echec asynchrone (fichier video illisible, runtime WebView2 absent...) : l'application remplace
     // alors le fond par le shader de secours.

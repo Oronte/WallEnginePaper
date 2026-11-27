@@ -13,6 +13,8 @@
 #include "audio/AudioCapture.h"
 #include "control/HotkeyManager.h"
 #include "control/Profiles.h"
+#include "system/MediaSession.h"
+#include "system/SystemStats.h"
 #include "config/ConfigManager.h"
 #include "core/Win32Util.h"
 #include "desktop/DesktopHost.h"
@@ -35,6 +37,10 @@ struct CommandLineOptions {
     bool audioDebug = false;                  // --audio-debug : statistiques audio chaque seconde dans le journal
     bool noAutoPause = false;                 // --no-autopause : ignore plein ecran / batterie (mesures)
     double nextEverySeconds = 0.0;            // --next-every <s> : fond suivant periodique (tests des transitions)
+    std::filesystem::path capturePath;        // --capture <png> : image du premier ecran apres --capture-delay s
+    double captureDelaySeconds = 4.0;
+    uint32_t captureWidth = 960;              // --capture-width <px> (0 = taille de l'ecran)
+    bool captureDone = false;
 };
 
 CommandLineOptions ParseCommandLine();
@@ -148,6 +154,9 @@ private:
     bool ScheduleOwnsWallpaper() const;
     void OnHotkey(HotkeyAction action);
     void ToggleControlPanel();
+    // Donnees systeme des fonds web : collectees seulement si une page visible s'y abonne.
+    void SystemFeedsTick();
+    void RefreshTheme();
 
     void OpenControlPanel();
     void CloseControlPanel();
@@ -230,7 +239,16 @@ private:
     bool lightTheme_ = true;
     WallpaperRef scheduleTarget_;  // dernier fond impose par la planification
     std::wstring scheduleStatus_;
-    std::map<std::string, std::vector<WallpaperRef>> history_;  // par ecran : fonds precedents (Fond precedent)
+    std::map<std::string, std::vector<WallpaperRef>> history_;
+
+    MediaSession media_;
+    SystemStats stats_;
+    MediaInfo mediaInfo_;
+    uint64_t mediaSerial_ = 0;
+    SystemStatsInfo statsInfo_;
+    uint64_t statsSerial_ = 0;
+    ThemeInfo theme_;
+    uint64_t themeSerial_ = 0;  // par ecran : fonds precedents (Fond precedent)
 };
 
 }  // namespace lwe

@@ -25,6 +25,7 @@ L'exécutable : `build\vs2026\Release\WallEnginePaper.exe` (garder le dossier `a
 | `--no-autopause` | ignore les pauses plein écran / maximisé / batterie pour cette session (mesures) |
 | `--audio-debug` | force la capture audio et résume le signal chaque seconde dans le journal |
 | `--next-every <s>` | passe au fond suivant toutes les *s* secondes (tests des transitions ; modifie la config) |
+| `--capture <png>` | enregistre une image du premier écran après `--capture-delay <s>` (4 s), réduite à `--capture-width <px>` (960 ; 0 = taille réelle) ; fonds web compris (WebView2 `CapturePreview`) |
 
 `tools/bench.sh [secondes] [fonds...]` lance chaque fond avec `--no-autopause --exit-after` et affiche la ligne
 `Regime etabli` du journal (FPS et CPU par seconde, mesurés après 5 s pour exclure le chargement). Mesures :
@@ -119,7 +120,26 @@ propre dans *Playlist*.
   wep.on('audio',  bands => { /* spectre 64 bandes ; wep.audioBands.bass… à jour */ });
   wep.on('beat',   e => { /* e.bpm, e.count, e.time (performance.now()) */ });
   wep.on('pause',  paused => { /* ... */ });
+
+  // Intégration système (collectée seulement si la page s'abonne, une fois par seconde) :
+  wep.on('media',  m => { /* m.available, title, artist, album, app, playing, position, duration, artwork
+                              (data URL, envoyée au changement de morceau) ; wep.mediaPosition() extrapole */ });
+  wep.on('system', s => { /* s.cpu (%), s.ram {percent, used, total} (Go), s.gpu (% ou null), s.vram {used,
+                              total} (Go ou null), s.battery {percent, charging} (ou null), s.time */ });
+  wep.on('theme',  t => { /* t.dark, t.accent ('#rrggbb'), t.accentRgb [r, g, b] — couleur d'accent Windows */ });
   ```
+
+  Morceau en cours : `GlobalSystemMediaTransportControlsSessionManager` (C++/WinRT, thread dédié) — tout lecteur
+  qui s'affiche dans le contrôle multimédia de Windows (Spotify, navigateurs, lecteur Windows…). Statistiques :
+  `GetSystemTimes`, `GlobalMemoryStatusEx`, compteurs PDH « GPU Engine » (moteurs 3D) et « GPU Adapter Memory »,
+  `GetSystemPowerStatus`. Thème : `AppsUseLightTheme` et couleur d'accent DWM, poussés au chargement et à chaque
+  changement. Désactivables dans *Paramètres › Intégration système*. Rien n'est envoyé hors du PC ; le journal ne
+  contient ni titre ni artiste.
+
+  Fonds d'exemple : **Now Playing** (`assets/web/nowplaying` : pochette floutée en fond avec fondu croisé, titre,
+  progression, spectre en miroir, pulsation au beat, mode démonstration sans musique) et **Widgets**
+  (`assets/web/widgets` : grande horloge, date, jauges processeur / mémoire / graphique / batterie, thème clair ou
+  sombre et couleur d'accent de Windows).
 
   `project.json` d'un fond web (exemple complet : `assets/web/constellation`) :
 
@@ -162,9 +182,10 @@ src/
   input/InputForwarder.*       Curseur global sans hook
   library/Library.*            Catalogue local (assets, fonds importés, dossiers, project.json)
   render/                      Device D3D11 partagé, FrameLimiter, RenderTexture, TextureLoader (WIC),
-                               TransitionRenderer (shader de transition)
+                               TransitionRenderer (shader de transition), TextureWriter (captures PNG)
   system/Autostart.*           Clé Run de l'utilisateur
   system/SystemInfo.*          Thème clair/sombre, animations Windows, couleur d'accent, application au premier plan
+  system/MediaSession.*        Morceau en cours (SMTC, C++/WinRT) ; system/SystemStats.* CPU, RAM, GPU (PDH), batterie
   control/                     SunTimes (NOAA), Scheduler, Profiles (réglages effectifs), HotkeyManager
   watchdog/PerformanceWatchdog.*  Plein écran / maximisé par écran, batterie, mode présentation
   wallpaper/IWallpaperBackend.h, WallpaperFactory.*   Contrat commun, fabrique
@@ -174,7 +195,7 @@ src/
   wallpaper/video/             VideoPlayer (Media Engine partagé), VideoBackend, VideoThumbnail
   wallpaper/web/               WebBackend (WebView2 verrouillé en local + pont JS)
   ui/                          ControlPanel (fenêtre + ImGui), ControlPanelViews, UiStyle, TrayIcon, FileDialogs
-assets/web/constellation/      Fond web d'exemple (Canvas, réglages, souris)
+assets/web/                    constellation (Canvas, souris), nowplaying (morceau en cours), widgets (horloge, stats)
 tests/                         Tests (ctest)
 ```
 

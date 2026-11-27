@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -77,6 +78,9 @@ public:
 
     void MaintenanceTick();
 
+    // Enregistre la prochaine image du fond en PNG (--capture), reduite a maxWidth pixels de large.
+    void RequestCapture(std::filesystem::path file, uint32_t maxWidth);
+
 private:
     void ComputeBufferSize(float renderScale);
     bool CreateSwapChain(std::wstring& error);
@@ -112,6 +116,8 @@ private:
 
     bool latencyTokenHeld_ = false;
     bool parallaxEnabled_ = true;
+    std::filesystem::path capturePath_;
+    uint32_t captureWidth_ = 0;
     bool paused_ = false;
     bool autoPaused_ = false;
     bool occluded_ = false;

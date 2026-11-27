@@ -8,6 +8,7 @@
 #include "core/Win32Util.h"
 #include "desktop/DesktopHost.h"
 #include "render/RenderDevice.h"
+#include "render/TextureWriter.h"
 
 namespace lwe {
 namespace {
@@ -288,6 +289,30 @@ SurfaceStatus MonitorContext::RenderFrame(const FrameTiming& timing, const Audio
     frame.mouse = mouse_;
     frame.audio = &audio;
 
+    if (!capturePath_.empty()) {
+        // Capture : une image dediee dans une texture hors ecran (le back buffer flip n'est pas relisible).
+        const std::filesystem::path file = std::move(capturePath_);
+        capturePath_.clear();
+        if (!backend_->PresentsToSwapChain()) {
+            if (!backend_->CapturePreview(file, captureWidth_)) {
+                log::Error(L"Capture impossible : le fond n'est pas pret");
+            }
+        } else {
+            RenderTexture target;
+            std::wstring error;
+            if (target.Create(device_.Device(), bufferWidth_, bufferHeight_)) {
+                backend_->Invalidate();
+                backend_->Render(target.rtv.Get(), frame);
+                if (SaveTextureToPng(device_, target.texture.Get(), file, captureWidth_, error)) {
+                    log::Info(L"Capture enregistree : {}", file.wstring());
+                } else {
+                    log::Error(L"Capture : {}", error);
+                }
+            }
+            backend_->Invalidate();
+        }
+    }
+
     if (!backend_->PresentsToSwapChain()) {
         backend_->Render(nullptr, frame);
         return SurfaceStatus::Presented;
@@ -383,6 +408,11 @@ void MonitorContext::SetPaused(bool globalPause, bool autoPause) {
         }
     }
     occluded_ = false;
+}
+
+void MonitorContext::RequestCapture(std::filesystem::path file, uint32_t maxWidth) {
+    capturePath_ = std::move(file);
+    captureWidth_ = maxWidth;
 }
 
 void MonitorContext::MaintenanceTick() {

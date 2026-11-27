@@ -687,6 +687,7 @@ std::string SerializeConfig(const AppConfig& config) {
     root["schedule"] = ScheduleToJson(config.schedule);
     root["profiles"] = ProfilesToJson(config.profiles);
     root["reducedMotion"] = kReducedMotionNames[static_cast<size_t>(config.reducedMotion)];
+    root["integration"] = {{"media", config.integration.media}, {"systemStats", config.integration.systemStats}};
     root["startWithWindows"] = config.startWithWindows;
     root["libraryFolders"] = PathListToJson(config.libraryFolders);
     return root.dump(2);
@@ -782,6 +783,10 @@ bool DeserializeConfig(std::string_view text, AppConfig& out, std::string& error
     }
     if (const auto it = root.find("profiles"); it != root.end()) {
         ProfilesFromJson(*it, config.profiles);
+    }
+    if (const auto it = root.find("integration"); it != root.end()) {
+        ReadValue(*it, "media", config.integration.media);
+        ReadValue(*it, "systemStats", config.integration.systemStats);
     }
     std::string reducedMotion;
     ReadValue(root, "reducedMotion", reducedMotion);

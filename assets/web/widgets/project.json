@@ -1,0 +1,13 @@
+{
+  "title": "Widgets",
+  "description": "Grande horloge et jauges du processeur, de la mémoire, de la carte graphique et de la batterie, aux couleurs de Windows.",
+  "type": "web",
+  "file": "index.html",
+  "preview": "preview.png",
+  "properties": {
+    "showSeconds": { "type": "bool", "label": "Secondes", "value": true },
+    "h24": { "type": "bool", "label": "Format 24 h", "value": true },
+    "showGpu": { "type": "bool", "label": "Carte graphique", "value": true },
+    "showBattery": { "type": "bool", "label": "Batterie", "value": true }
+  }
+}

@@ -17,6 +17,7 @@
 #include "core/Paths.h"
 #include "core/StringUtil.h"
 #include "core/Win32Util.h"
+#include "render/TextureWriter.h"
 
 namespace lwe {
 namespace {
@@ -48,8 +49,25 @@ constexpr wchar_t kBridgeScript[] = LR"js(
     volume: 1,
     muted: false,
     paused: false,
-    on(type, callback) { (listeners[type] = listeners[type] || []).push(callback); },
+    media: { available: false, title: '', artist: '', album: '', app: '', playing: false, position: 0,
+             duration: 0, artwork: '', positionTime: 0 },
+    system: null,
+    theme: { dark: true, accent: '#8c62ff', accentRgb: [140, 98, 255] },
+    // Position courante du morceau (extrapolee entre deux mises a jour), en secondes.
+    mediaPosition() {
+      const m = api.media;
+      return m.playing ? Math.min(m.duration || Infinity, m.position + (performance.now() - m.positionTime) / 1000) : m.position;
+    },
+    on(type, callback) {
+      (listeners[type] = listeners[type] || []).push(callback);
+      // 'media' et 'system' ne sont collectes que si une page s'y abonne.
+      if ((type === 'media' || type === 'system') && !subscribed[type]) {
+        subscribed[type] = true;
+        window.chrome.webview.postMessage({ type: 'subscribe', topic: type });
+      }
+    },
   };
+  const subscribed = {};
   Object.defineProperty(window, 'wallEnginePaper', { value: api, writable: false });
   const emit = (type, value) => (listeners[type] || []).forEach(cb => { try { cb(value); } catch (e) { console.error(e); } });
   const applyVolume = () => document.querySelectorAll('audio, video').forEach(m => { m.volume = api.volume; m.muted = api.muted; });
@@ -82,6 +100,15 @@ constexpr wchar_t kBridgeScript[] = LR"js(
       api.volume = m.volume; api.muted = m.muted; applyVolume();
     } else if (m.type === 'pause') {
       api.paused = m.paused; emit('pause', m.paused);
+    } else if (m.type === 'media') {
+      const artwork = m.media.artwork;
+      Object.assign(api.media, m.media, { positionTime: performance.now() });
+      if (artwork === undefined) api.media.artwork = api.media.artwork || '';
+      emit('media', api.media);
+    } else if (m.type === 'system') {
+      api.system = m.system; emit('system', api.system);
+    } else if (m.type === 'theme') {
+      Object.assign(api.theme, m.theme); emit('theme', api.theme);
     }
   });
   document.addEventListener('DOMContentLoaded', applyVolume);
@@ -333,9 +360,32 @@ HRESULT WebBackend::OnControllerCreated(HRESULT result, ICoreWebView2Controller*
             })
             .Get(),
         &token);
+    // Abonnements de la page (wep.on('media' | 'system')) : seule information acceptee en provenance du JS.
+    webview_->add_WebMessageReceived(
+        Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+            [this, alive](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                LPWSTR json = nullptr;
+                if (alive.expired() || FAILED(args->get_WebMessageAsJson(&json)) || !json) {
+                    return S_OK;
+                }
+                const auto message = nlohmann::json::parse(WideToUtf8(json), nullptr, false);
+                CoTaskMemFree(json);
+                if (message.is_object() && message.value("type", "") == "subscribe") {
+                    const std::string topic = message.value("topic", "");
+                    topics_ |= topic == "media" ? kTopicMedia : (topic == "system" ? kTopicSystem : 0u);
+                }
+                return S_OK;
+            })
+            .Get(),
+        &token);
     webview_->add_NavigationStarting(
         Callback<ICoreWebView2NavigationStartingEventHandler>(
-            [](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+            [this, alive](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+                if (!alive.expired()) {
+                    // Nouvelle page : abonnements et envois repartent de zero.
+                    topics_ = 0;
+                    sentMediaSerial_ = sentTrackSerial_ = sentStatsSerial_ = sentThemeSerial_ = 0;
+                }
                 LPWSTR uri = nullptr;
                 if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
                     if (!IsAllowedUri(uri)) {
@@ -564,6 +614,77 @@ void WebBackend::SetParameter(std::string_view name, const ParamValue& value) {
         }
     }
     SendParams();
+}
+
+bool WebBackend::CapturePreview(const std::filesystem::path& file, uint32_t maxWidth) {
+    if (!webview_ || !ready_) {
+        return false;
+    }
+    ComPtr<IStream> stream;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream))) {
+        return false;
+    }
+    const HRESULT hr = webview_->CapturePreview(
+        COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, stream.Get(),
+        Callback<ICoreWebView2CapturePreviewCompletedHandler>([stream, file, maxWidth](HRESULT result) -> HRESULT {
+            std::wstring error;
+            if (SUCCEEDED(result) && ResavePng(stream.Get(), file, maxWidth, error)) {
+                log::Info(L"Capture enregistree : {}", file.wstring());
+            } else {
+                log::Error(L"Capture du fond web impossible : {}", error.empty() ? HResultToString(result) : error);
+            }
+            return S_OK;
+        }).Get());
+    return SUCCEEDED(hr);
+}
+
+void WebBackend::PushSystemData(const SystemSnapshot& snapshot) {
+    if (!ready_ || paused_) {
+        return;
+    }
+    if (snapshot.themeSerial != sentThemeSerial_) {
+        sentThemeSerial_ = snapshot.themeSerial;
+        const auto& a = snapshot.theme.accent;
+        const int r = static_cast<int>(std::lround(a[0] * 255.0f));
+        const int g = static_cast<int>(std::lround(a[1] * 255.0f));
+        const int b = static_cast<int>(std::lround(a[2] * 255.0f));
+        const nlohmann::json message{{"type", "theme"},
+                                     {"theme", {{"dark", snapshot.theme.dark},
+                                                {"accent", std::format("#{:02x}{:02x}{:02x}", r, g, b)},
+                                                {"accentRgb", {r, g, b}}}}};
+        Post(Utf8ToWide(message.dump()));
+    }
+    if ((topics_ & kTopicMedia) && snapshot.media && snapshot.mediaSerial != sentMediaSerial_) {
+        sentMediaSerial_ = snapshot.mediaSerial;
+        const MediaInfo& m = *snapshot.media;
+        nlohmann::json media{{"available", m.available}, {"title", WideToUtf8(m.title)},
+                             {"artist", WideToUtf8(m.artist)}, {"album", WideToUtf8(m.album)},
+                             {"app", WideToUtf8(m.app)},       {"playing", m.playing},
+                             {"position", m.positionSeconds},  {"duration", m.durationSeconds}};
+        // La pochette (jusqu'a quelques centaines de Ko) n'est envoyee qu'au changement de morceau.
+        if (m.trackSerial != sentTrackSerial_) {
+            sentTrackSerial_ = m.trackSerial;
+            media["artwork"] = m.artworkDataUrl;
+        }
+        Post(Utf8ToWide(nlohmann::json{{"type", "media"}, {"media", std::move(media)}}.dump()));
+    }
+    if ((topics_ & kTopicSystem) && snapshot.stats && snapshot.statsSerial != sentStatsSerial_) {
+        sentStatsSerial_ = snapshot.statsSerial;
+        const SystemStatsInfo& s = *snapshot.stats;
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        nlohmann::json system{
+            {"cpu", std::lround(s.cpuPercent * 10.0f) / 10.0},
+            {"ram", {{"percent", s.ramPercent}, {"used", s.ramUsedGb}, {"total", s.ramTotalGb}}},
+            {"gpu", s.gpuPercent < 0.0f ? nlohmann::json(nullptr) : nlohmann::json(std::lround(s.gpuPercent * 10.0f) / 10.0)},
+            {"vram", s.vramUsedGb < 0.0 ? nlohmann::json(nullptr)
+                                        : nlohmann::json{{"used", s.vramUsedGb}, {"total", s.vramTotalGb}}},
+            {"battery", s.batteryPercent < 0 ? nlohmann::json(nullptr)
+                                             : nlohmann::json{{"percent", s.batteryPercent}, {"charging", s.charging}}},
+            {"time", std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", now.wYear, now.wMonth, now.wDay, now.wHour,
+                                 now.wMinute, now.wSecond)}};
+        Post(Utf8ToWide(nlohmann::json{{"type", "system"}, {"system", std::move(system)}}.dump()));
+    }
 }
 
 void WebBackend::OnPauseChanged(bool paused) {
