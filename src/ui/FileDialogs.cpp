@@ -9,7 +9,10 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
-std::optional<std::filesystem::path> RunOpenDialog(HWND owner, bool pickFolder) {
+enum class DialogKind { Wallpaper, Folder, Executable };
+
+std::optional<std::filesystem::path> RunOpenDialog(HWND owner, DialogKind kind) {
+    const bool pickFolder = kind == DialogKind::Folder;
     ComPtr<IFileOpenDialog> dialog;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
         return std::nullopt;
@@ -20,6 +23,11 @@ std::optional<std::filesystem::path> RunOpenDialog(HWND owner, bool pickFolder) 
     if (pickFolder) {
         options |= FOS_PICKFOLDERS;
         dialog->SetTitle(L"Ajouter un dossier de fonds d'écran");
+    } else if (kind == DialogKind::Executable) {
+        options |= FOS_FILEMUSTEXIST;
+        dialog->SetTitle(L"Choisir une application");
+        static const COMDLG_FILTERSPEC kExecutables[] = {{L"Applications", L"*.exe"}};
+        dialog->SetFileTypes(1, kExecutables);
     } else {
         options |= FOS_FILEMUSTEXIST;
         dialog->SetTitle(L"Importer un fond d'écran");
@@ -50,11 +58,15 @@ std::optional<std::filesystem::path> RunOpenDialog(HWND owner, bool pickFolder) 
 }  // namespace
 
 std::optional<std::filesystem::path> PickWallpaperFile(HWND owner) {
-    return RunOpenDialog(owner, false);
+    return RunOpenDialog(owner, DialogKind::Wallpaper);
 }
 
 std::optional<std::filesystem::path> PickFolder(HWND owner) {
-    return RunOpenDialog(owner, true);
+    return RunOpenDialog(owner, DialogKind::Folder);
+}
+
+std::optional<std::filesystem::path> PickExecutable(HWND owner) {
+    return RunOpenDialog(owner, DialogKind::Executable);
 }
 
 void OpenInShell(const std::filesystem::path& path) {

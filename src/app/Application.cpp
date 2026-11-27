@@ -16,7 +16,9 @@
 #include "desktop/MonitorEnumerator.h"
 #include "lwe_version.h"
 #include "resource.h"
+#include "control/Scheduler.h"
 #include "system/Autostart.h"
+#include "system/SystemInfo.h"
 #include "ui/FileDialogs.h"
 #include "wallpaper/WallpaperFactory.h"
 #include "wallpaper/shader/ShaderBackend.h"
@@ -48,6 +50,10 @@ enum Command : UINT {
     kCmdPause,
     kCmdMute,
     kCmdNext,
+    kCmdPrevious,
+    kCmdSchedule,
+    kCmdNoProfile,
+    kCmdProfileBase = 2000,
     kCmdSpan,
     kCmdQuit,
     kCmdFpsBase = 1000,
@@ -190,7 +196,10 @@ bool Application::Initialize() {
     audioCapture_.SetBeatSensitivity(config_.Data().audio.beatSensitivity);
     audioCapture_.SetSmoothing(config_.Data().audio.attackMs, config_.Data().audio.releaseMs);
     autostart::Sync(config_.Data().startWithWindows);
-    limiter_.SetTargetFps(config_.Data().fpsLimit);
+    systemAnimations_ = systeminfo::ClientAreaAnimationsEnabled();
+    lightTheme_ = systeminfo::AppsUseLightTheme();
+    RefreshEffectiveSettings(config_.Data().profiles.active);
+    limiter_.SetTargetFps(effective_.fpsLimit);
     uiLimiter_.SetTargetFps(kUiFps);
     if (!limiter_.UsesHighResolutionTimer()) {
         log::Warn(L"Timer haute resolution indisponible : cadence moins precise");
@@ -214,6 +223,7 @@ bool Application::Initialize() {
     sessionNotificationsRegistered_ = WTSRegisterSessionNotification(controlWindow_, NOTIFY_FOR_THIS_SESSION) != FALSE;
     SetTimer(controlWindow_, kTimerMaintenance, kMaintenanceIntervalMs, nullptr);
     SetTimer(controlWindow_, kTimerWatchdog, kWatchdogIntervalMs, nullptr);
+    hotkeys_.Apply(controlWindow_, config_.Data().hotkeys);
 
     std::wstring error;
     if (!device_.Create(error)) {
@@ -325,6 +335,7 @@ void Application::Shutdown() {
         KillTimer(controlWindow_, kTimerMaintenance);
         KillTimer(controlWindow_, kTimerRebuild);
         KillTimer(controlWindow_, kTimerWatchdog);
+        hotkeys_.UnregisterAll();
         if (sessionNotificationsRegistered_) {
             WTSUnRegisterSessionNotification(controlWindow_);
             sessionNotificationsRegistered_ = false;
@@ -455,7 +466,8 @@ void Application::RebuildSurfaces() {
     for (auto& target : targets) {
         auto surface = std::make_unique<MonitorContext>(device_, desktop_, instance_, std::move(target));
         std::wstring error;
-        if (!surface->Create(config.renderScale, error)) {
+        surface->SetParallaxEnabled(!effective_.reducedMotion);
+        if (!surface->Create(effective_.renderScale, error)) {
             log::Error(L"Surface « {} » : {}", surface->Info().friendlyName, error);
             continue;
         }
@@ -484,7 +496,7 @@ TransitionRequest Application::MakeTransition(const TransitionSettings& settings
     TransitionRequest request;
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     request.type = ResolveTransitionType(settings.type, unit(random_));
-    request.seconds = settings.seconds;
+    request.seconds = effective_.reducedMotion ? 0.0f : settings.seconds;  // accessibilite : coupe nette
     request.seed = unit(random_);
     return request;
 }
@@ -502,9 +514,8 @@ void Application::InstallWallpaper(MonitorContext& surface, const WallpaperDesc&
     const bool sameSource = PathKey(surface.Desc().source) == PathKey(desc.source) && surface.Backend();
     std::wstring error;
     if (auto backend = CreateWallpaperBackend(desc.type, error)) {
-        const AudioSettings& audio = config_.Data().audio;
-        const BackendInitContext init{device_,  surface.Window(), surface.BufferWidth(), surface.BufferHeight(),
-                                      desc,     audio.volume,     audio.muted};
+        const BackendInitContext init{device_, surface.Window(),   surface.BufferWidth(), surface.BufferHeight(),
+                                      desc,    effective_.volume, effective_.muted};
         if (backend->Initialize(init, error)) {
             log::Info(L"« {} » affiche {}", surface.Info().friendlyName,
                       desc.source.empty() ? std::wstring(L"le shader integre") : desc.source.wstring());
@@ -539,7 +550,7 @@ FrameTiming Application::NextTiming() {
         std::clamp(static_cast<float>(static_cast<double>(now - qpcLast_) / static_cast<double>(qpcFrequency_)),
                    0.0f, 0.1f);
     timing.frameIndex = frameIndex_++;
-    timing.targetFps = static_cast<float>(config_.Data().fpsLimit);
+    timing.targetFps = static_cast<float>(effective_.fpsLimit);
     qpcLast_ = now;
     return timing;
 }
@@ -650,7 +661,7 @@ void Application::SetPauseReason(uint32_t reason, bool active) {
 }
 
 PauseRules Application::EffectivePauseRules() const {
-    PauseRules rules = config_.Data().pause;
+    PauseRules rules = effective_.pause;
     if (options_.noAutoPause) {
         rules.onFullscreenApp = false;
         rules.onMaximizedApp = false;
@@ -662,6 +673,7 @@ PauseRules Application::EffectivePauseRules() const {
 void Application::WatchdogTick() {
     const PauseRules rules = EffectivePauseRules();
     watchdog_.Update(rules, monitors_, panel_ ? panel_->Window() : nullptr);
+    ProfileTick();
     SetPauseReason(kPauseBattery, rules.onBattery && watchdog_.OnBattery());
     ApplyPauseState();
 }
@@ -731,6 +743,7 @@ void Application::MaintenanceTick() {
         }
     }
     ReplaceFailedBackends();
+    ScheduleTick(false);
     PlaylistTick();
     if (options_.nextEverySeconds > 0.0 &&
         static_cast<double>(GetTickCount64() - lastForcedNextMs_) >= options_.nextEverySeconds * 1000.0) {
@@ -822,10 +835,9 @@ void Application::SetAudioSmoothing(float attackMs, float releaseMs) {
 }
 
 void Application::ApplyAudioOutput() {
-    const AudioSettings& audio = config_.Data().audio;
     for (auto& surface : surfaces_) {
         if (surface->Backend()) {
-            surface->Backend()->SetAudioOutput(audio.volume, audio.muted);
+            surface->Backend()->SetAudioOutput(effective_.volume, effective_.muted);
         }
     }
 }
@@ -833,14 +845,13 @@ void Application::ApplyAudioOutput() {
 void Application::SetVolume(float volume) {
     config_.Data().audio.volume = std::clamp(volume, 0.0f, 1.0f);
     config_.MarkDirty();
-    ApplyAudioOutput();
+    RefreshEffectiveSettings(effective_.profile);
 }
 
 void Application::SetMuted(bool muted) {
     config_.Data().audio.muted = muted;
     config_.MarkDirty();
-    ApplyAudioOutput();
-    UpdateTrayTooltip();
+    RefreshEffectiveSettings(effective_.profile);
 }
 
 IWallpaperBackend* Application::LiveBackendFor(const LibraryItem& item) {
@@ -874,7 +885,22 @@ std::vector<const LibraryItem*> Application::RotationCandidates() const {
     return candidates;
 }
 
-void Application::AdvanceWallpapers() {
+void Application::RememberCurrent(const MonitorContext& surface) {
+    if (surface.Desc().source.empty()) {
+        return;
+    }
+    auto& history = history_[surface.Info().id];
+    const WallpaperRef current{surface.Desc().type, surface.Desc().source};
+    if (history.empty() || !(history.back() == current)) {
+        history.push_back(current);
+    }
+    constexpr size_t kMaxHistory = 20;
+    if (history.size() > kMaxHistory) {
+        history.erase(history.begin());
+    }
+}
+
+void Application::AdvanceWallpapers(int direction) {
     const std::vector<const LibraryItem*> candidates = RotationCandidates();
     if (candidates.empty()) {
         log::Warn(L"Aucun fond disponible pour la rotation");
@@ -893,7 +919,19 @@ void Application::AdvanceWallpapers() {
             }
         }
         size_t next = 0;
-        if (shuffle && candidates.size() > 1) {
+        if (direction < 0) {
+            // Fond precedent : historique de l'ecran, sinon ordre de rotation a rebours.
+            auto& history = history_[surface->Info().id];
+            if (!history.empty()) {
+                const WallpaperRef previous = history.back();
+                history.pop_back();
+                AssignWallpaper(surface->Info(), previous);
+                InstallWallpaper(*surface, config_.Resolve(previous), transition);
+                continue;
+            }
+            next = currentIndex < candidates.size() ? (currentIndex + candidates.size() - 1) % candidates.size()
+                                                    : candidates.size() - 1;
+        } else if (shuffle && candidates.size() > 1) {
             std::uniform_int_distribution<size_t> pick(0, candidates.size() - 1);
             do {
                 next = pick(random_);
@@ -902,6 +940,9 @@ void Application::AdvanceWallpapers() {
             next = (currentIndex + 1) % candidates.size();
         }
         const WallpaperRef ref = candidates[next]->Ref();
+        if (direction > 0) {
+            RememberCurrent(*surface);
+        }
         AssignWallpaper(surface->Info(), ref);
         InstallWallpaper(*surface, config_.Resolve(ref), transition);
     }
@@ -911,8 +952,8 @@ void Application::AdvanceWallpapers() {
 void Application::PlaylistTick() {
     const PlaylistSettings& playlist = config_.Data().playlist;
     const uint64_t now = GetTickCount64();
-    if (!playlist.enabled || IsPaused()) {
-        return;
+    if (!playlist.enabled || IsPaused() || ScheduleOwnsWallpaper()) {
+        return;  // la planification a la priorite sur la rotation
     }
     if (now - playlistAnchorMs_ >= static_cast<uint64_t>(playlist.intervalMinutes) * 60'000) {
         log::Info(L"Playlist : fond suivant");
@@ -981,10 +1022,15 @@ void Application::ApplyWallpaper(const LibraryItem& item, const std::string& mon
     if (!item.supported) {
         return;
     }
+    ApplyWallpaperRef(item.Ref(), monitorId, MakeTransition(config_.Data().transition));
+    RestartPlaylistTimer();
+}
+
+void Application::ApplyWallpaperRef(const WallpaperRef& ref, const std::string& monitorId,
+                                    const TransitionRequest& transition) {
     options_.wallpaperOverride.clear();
     failureRetries_.clear();
     AppConfig& config = config_.Data();
-    const WallpaperRef ref = item.Ref();
     const bool allScreens = monitorId.empty() || config.layout == LayoutMode::Span;
     if (allScreens) {
         if (config.layout == LayoutMode::Span) {
@@ -1001,14 +1047,15 @@ void Application::ApplyWallpaper(const LibraryItem& item, const std::string& mon
     config_.MarkDirty();
 
     const WallpaperDesc desc = config_.Resolve(ref);
-    const TransitionRequest transition = MakeTransition(config.transition);
     for (auto& surface : surfaces_) {
         if (allScreens || surface->Info().id == monitorId) {
+            if (PathKey(surface->Desc().source) != PathKey(desc.source)) {
+                RememberCurrent(*surface);
+            }
             InstallWallpaper(*surface, desc, transition);
         }
     }
     ApplyPauseState();
-    RestartPlaylistTimer();
 }
 
 void Application::SetWallpaperParameter(const LibraryItem& item, const std::string& name, const ParamValue& value) {
@@ -1034,8 +1081,165 @@ void Application::ResetWallpaperParameters(const LibraryItem& item) {
 }
 
 void Application::NextWallpaper() {
-    AdvanceWallpapers();
+    AdvanceWallpapers(1);
     RestartPlaylistTimer();
+}
+
+void Application::PreviousWallpaper() {
+    AdvanceWallpapers(-1);
+    RestartPlaylistTimer();
+}
+
+// =============================================================================================== //
+//  Profils, planification, raccourcis, accessibilite
+// =============================================================================================== //
+
+void Application::RefreshEffectiveSettings(const std::string& profile) {
+    const AppConfig& config = config_.Data();
+    const bool reduced = config.reducedMotion == ReducedMotion::On ||
+                         (config.reducedMotion == ReducedMotion::Auto && !systemAnimations_);
+    const EffectiveSettings previous = effective_;
+    effective_ = ComputeEffectiveSettings(config, FindProfile(config.profiles, profile), reduced);
+
+    if (previous.profile != effective_.profile) {
+        log::Info(L"Profil : {}", effective_.profile.empty() ? std::wstring(L"aucun (reglages de base)")
+                                                              : Utf8ToWide(effective_.profile));
+    }
+    if (previous.reducedMotion != effective_.reducedMotion) {
+        log::Info(L"Animations reduites : {}", effective_.reducedMotion ? L"oui" : L"non");
+        for (auto& surface : surfaces_) {
+            surface->SetParallaxEnabled(!effective_.reducedMotion);
+        }
+    }
+    if (previous.fpsLimit != effective_.fpsLimit) {
+        limiter_.SetTargetFps(effective_.fpsLimit);
+    }
+    if (previous.volume != effective_.volume || previous.muted != effective_.muted) {
+        ApplyAudioOutput();
+    }
+    if (previous.renderScale != effective_.renderScale && running_) {
+        RebuildSurfaces();
+    }
+    if (running_) {
+        UpdateTrayTooltip();
+    }
+}
+
+std::string Application::DesiredProfile() const {
+    const ProfileSettings& settings = config_.Data().profiles;
+    const bool needForeground = settings.autoSwitch && !settings.rules.empty();
+    return ResolveProfileName(settings, needForeground ? systeminfo::ForegroundExecutable() : std::wstring(),
+                              watchdog_.OnBattery());
+}
+
+void Application::ProfileTick() {
+    // Bascule seulement si le choix reste le meme ~1 s (pas de va-et-vient a chaque Alt+Tab).
+    const std::string desired = DesiredProfile();
+    if (desired == effective_.profile) {
+        pendingProfileTicks_ = 0;
+        return;
+    }
+    if (desired != pendingProfile_) {
+        pendingProfile_ = desired;
+        pendingProfileTicks_ = 1;
+        return;
+    }
+    if (++pendingProfileTicks_ >= 2) {
+        pendingProfileTicks_ = 0;
+        RefreshEffectiveSettings(desired);
+    }
+}
+
+void Application::RefreshAutomation() {
+    config_.MarkDirty();
+    RefreshEffectiveSettings(DesiredProfile());
+    ScheduleTick(true);
+}
+
+bool Application::ScheduleOwnsWallpaper() const {
+    return config_.Data().schedule.enabled && !scheduleTarget_.Empty();
+}
+
+void Application::ScheduleTick(bool force) {
+    const ScheduleSettings& schedule = config_.Data().schedule;
+    if (!schedule.enabled) {
+        scheduleTarget_ = {};
+        scheduleStatus_ = L"Désactivée";
+        return;
+    }
+    // Heure locale et decalage UTC du jour (heure d'ete comprise).
+    FILETIME utc{};
+    GetSystemTimeAsFileTime(&utc);
+    FILETIME local{};
+    FileTimeToLocalFileTime(&utc, &local);
+    SYSTEMTIME now{};
+    FileTimeToSystemTime(&local, &now);
+    const auto ticks = [](const FILETIME& ft) {
+        return static_cast<int64_t>((static_cast<uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime);
+    };
+    ScheduleContext context;
+    context.year = now.wYear;
+    context.month = now.wMonth;
+    context.day = now.wDay;
+    context.minutesOfDay = now.wHour * 60.0 + now.wMinute + now.wSecond / 60.0;
+    context.utcOffsetHours = static_cast<double>(ticks(local) - ticks(utc)) / 36'000'000'000.0;
+    context.lightTheme = lightTheme_;
+    const ScheduleDecision decision = EvaluateSchedule(schedule, context);
+
+    std::wstring detail;
+    if (schedule.mode == ScheduleMode::Sun) {
+        const SunTimes sun = ComputeSunTimes(context.year, context.month, context.day, schedule.latitude,
+                                             schedule.longitude, context.utcOffsetHours);
+        detail = sun.kind == SunTimes::Kind::Normal
+                     ? std::format(L" (lever {}, coucher {})", Utf8ToWide(FormatMinutes(sun.sunriseMinutes)),
+                                   Utf8ToWide(FormatMinutes(sun.sunsetMinutes)))
+                     : std::wstring(sun.kind == SunTimes::Kind::PolarDay ? L" (soleil de minuit)" : L" (nuit polaire)");
+    }
+    if (decision.wallpaper.Empty()) {
+        scheduleStatus_ = L"Aucun fond prévu pour ce moment" + detail;
+        scheduleTarget_ = {};
+        return;
+    }
+    scheduleStatus_ = L"Active : " + Utf8ToWide(decision.reason) + detail;
+    if (force || !(decision.wallpaper == scheduleTarget_)) {
+        scheduleTarget_ = decision.wallpaper;
+        log::Info(L"Planification ({}) : {}", Utf8ToWide(decision.reason), decision.wallpaper.source.wstring());
+        ApplyWallpaperRef(decision.wallpaper, std::string(), MakeTransition(config_.Data().transition));
+    }
+}
+
+void Application::ApplyHotkeys() {
+    config_.MarkDirty();
+    hotkeys_.Apply(controlWindow_, config_.Data().hotkeys);
+}
+
+void Application::SuspendHotkeys(bool suspended) {
+    if (suspended) {
+        hotkeys_.UnregisterAll();
+    } else {
+        hotkeys_.Apply(controlWindow_, config_.Data().hotkeys);
+    }
+}
+
+void Application::ToggleControlPanel() {
+    if (panel_ && panel_->IsVisible() && GetForegroundWindow() == panel_->Window()) {
+        CloseControlPanel();
+    } else {
+        OpenControlPanel();
+        if (panel_) {
+            SetForegroundWindow(panel_->Window());
+        }
+    }
+}
+
+void Application::OnHotkey(HotkeyAction action) {
+    switch (action) {
+    case HotkeyAction::Next: NextWallpaper(); break;
+    case HotkeyAction::Previous: PreviousWallpaper(); break;
+    case HotkeyAction::Pause: SetManualPause(!IsManuallyPaused()); break;
+    case HotkeyAction::Mute: SetMuted(!config_.Data().audio.muted); break;
+    case HotkeyAction::TogglePanel: ToggleControlPanel(); break;
+    }
 }
 
 void Application::SetFpsLimit(uint32_t fps) {
@@ -1045,14 +1249,14 @@ void Application::SetFpsLimit(uint32_t fps) {
     }
     config_.Data().fpsLimit = fps;
     config_.MarkDirty();
-    limiter_.SetTargetFps(fps);
+    RefreshEffectiveSettings(effective_.profile);
 }
 
 void Application::SetRenderScale(float scale) {
     scale = std::clamp(scale, 0.25f, 1.0f);
     config_.Data().renderScale = scale;
     config_.MarkDirty();
-    RebuildSurfaces();
+    RefreshEffectiveSettings(effective_.profile);  // reconstruit les surfaces si la qualite effective change
 }
 
 void Application::SetLayout(LayoutMode layout) {
@@ -1123,7 +1327,8 @@ void Application::RenderControlPanel() {
 }
 
 void Application::UpdateTrayTooltip() {
-    tray_.SetTooltip(std::format(L"{} – {}", kProductName, StatusText()));
+    const std::wstring profile = effective_.profile.empty() ? std::wstring() : L" · profil " + Utf8ToWide(effective_.profile);
+    tray_.SetTooltip(std::format(L"{} – {}{}", kProductName, StatusText(), profile));
 }
 
 double Application::ProcessCpuMs() const {
@@ -1185,6 +1390,21 @@ void Application::ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING, kCmdPause, manualPause ? L"Reprendre" : L"Pause");
     AppendMenuW(menu, MF_STRING | (config.audio.muted ? MF_CHECKED : 0u), kCmdMute, L"Muet");
     AppendMenuW(menu, MF_STRING, kCmdNext, L"Fond suivant");
+    AppendMenuW(menu, MF_STRING, kCmdPrevious, L"Fond précédent");
+    AppendMenuW(menu, MF_STRING | (config.schedule.enabled ? MF_CHECKED : 0u), kCmdSchedule, L"Planification");
+    HMENU profileMenu = CreatePopupMenu();
+    AppendMenuW(profileMenu, MF_STRING | (config.profiles.active.empty() ? MF_CHECKED : 0u), kCmdNoProfile,
+                L"Aucun (réglages de base)");
+    for (size_t i = 0; i < config.profiles.profiles.size() && i < 100; ++i) {
+        const Profile& profile = config.profiles.profiles[i];
+        std::wstring label = Utf8ToWide(profile.name);
+        if (effective_.profile == profile.name && config.profiles.active != profile.name) {
+            label += L"  (automatique)";
+        }
+        AppendMenuW(profileMenu, MF_STRING | (config.profiles.active == profile.name ? MF_CHECKED : 0u),
+                    kCmdProfileBase + i, label.c_str());
+    }
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(profileMenu), L"Profil");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (config.layout == LayoutMode::Span ? MF_CHECKED : 0u), kCmdSpan,
                 L"Étendre sur tous les écrans");
@@ -1222,6 +1442,17 @@ void Application::ExecuteCommand(UINT command) {
     case kCmdNext:
         NextWallpaper();
         break;
+    case kCmdPrevious:
+        PreviousWallpaper();
+        break;
+    case kCmdSchedule:
+        config_.Data().schedule.enabled = !config_.Data().schedule.enabled;
+        RefreshAutomation();
+        break;
+    case kCmdNoProfile:
+        config_.Data().profiles.active.clear();
+        RefreshAutomation();
+        break;
     case kCmdSpan:
         SetLayout(config_.Data().layout == LayoutMode::Span ? LayoutMode::PerMonitor : LayoutMode::Span);
         break;
@@ -1231,6 +1462,12 @@ void Application::ExecuteCommand(UINT command) {
     default:
         if (command > kCmdFpsBase && command <= kCmdFpsBase + 360) {
             SetFpsLimit(command - kCmdFpsBase);
+        } else if (command >= kCmdProfileBase && command < kCmdProfileBase + 100) {
+            const size_t index = command - kCmdProfileBase;
+            if (index < config_.Data().profiles.profiles.size()) {
+                config_.Data().profiles.active = config_.Data().profiles.profiles[index].name;
+                RefreshAutomation();
+            }
         }
         break;
     }
@@ -1285,6 +1522,26 @@ LRESULT Application::WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
             RebuildSurfaces();
         }
         return 0;
+
+    case WM_HOTKEY:
+        if (const auto action = hotkeys_.ActionFor(wParam)) {
+            OnHotkey(*action);
+        }
+        return 0;
+
+    case WM_SETTINGCHANGE:
+        if (wParam == SPI_SETCLIENTAREAANIMATION) {
+            systemAnimations_ = systeminfo::ClientAreaAnimationsEnabled();
+            RefreshEffectiveSettings(effective_.profile);
+        } else if (systeminfo::IsThemeChangeMessage(lParam)) {
+            const bool light = systeminfo::AppsUseLightTheme();
+            if (light != lightTheme_) {
+                lightTheme_ = light;
+                log::Info(L"Theme Windows : {}", light ? L"clair" : L"sombre");
+                ScheduleTick(false);
+            }
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
 
     case WM_DISPLAYCHANGE:
     case WM_DPICHANGED:

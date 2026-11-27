@@ -28,9 +28,11 @@ public:
 
     void SetStyle(const ui::Fonts& fonts, float scale);
     void Draw(float deltaSeconds);
+    // Touche enfoncee dans la fenetre : true si elle a ete consommee par la saisie d'un raccourci.
+    bool OnKeyDown(unsigned int virtualKey);
 
 private:
-    enum class Tab { Library, Screens, Playlist, Settings };
+    enum class Tab { Library, Screens, Playlist, Automation, Settings };
     enum class Filter { All, Shader, Video, Web, Scene };
 
     struct Thumbnail {
@@ -49,6 +51,11 @@ private:
     void DrawScreens();
     void DrawPlaylist();
     void DrawSettings();
+    void DrawAutomation();
+    void DrawHotkeys();
+    void DrawSchedule();
+    void DrawProfiles();
+    bool WallpaperCombo(const char* id, WallpaperRef& ref);
     void DrawToast(float deltaSeconds);
 
     std::vector<const LibraryItem*> FilteredItems() const;
@@ -101,6 +108,9 @@ private:
     MouseState previewMouse_;
     AudioSpectrum silence_;       // miniatures : instantane sans son
     AudioSpectrum previewAudio_;  // apercu en direct : spectre courant
+
+    int capturingHotkey_ = -1;  // action en cours de saisie (-1 : aucune)
+    char ruleExecutable_[260] = {};
 
     std::string toast_;
     float toastTime_ = 0.0f;

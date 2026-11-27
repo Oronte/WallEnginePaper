@@ -64,6 +64,8 @@ public:
     bool UsesFlipModel() const noexcept { return flipModel_; }
 
     void UpdatePointer(const GlobalPointerState& pointer, float deltaSeconds);
+    // Animations reduites (accessibilite) : la parallaxe reste au centre.
+    void SetParallaxEnabled(bool enabled) noexcept { parallaxEnabled_ = enabled; }
     SurfaceStatus RenderFrame(const FrameTiming& timing, const AudioSpectrum& audio);
     void Show();
 
@@ -109,6 +111,7 @@ private:
     MouseState mouse_;
 
     bool latencyTokenHeld_ = false;
+    bool parallaxEnabled_ = true;
     bool paused_ = false;
     bool autoPaused_ = false;
     bool occluded_ = false;

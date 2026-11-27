@@ -79,7 +79,18 @@ set(LWE_SOURCES
     src/render/TextureLoader.h
     src/render/TextureLoader.cpp
 
+    src/control/SunTimes.h
+    src/control/SunTimes.cpp
+    src/control/Scheduler.h
+    src/control/Scheduler.cpp
+    src/control/Profiles.h
+    src/control/Profiles.cpp
+    src/control/HotkeyManager.h
+    src/control/HotkeyManager.cpp
+
     src/system/Autostart.h
+    src/system/SystemInfo.h
+    src/system/SystemInfo.cpp
     src/system/Autostart.cpp
 
     src/watchdog/PerformanceWatchdog.h
@@ -176,6 +187,10 @@ add_executable(WallEnginePaperTests
     tests/SpectrumAnalyzerTest.cpp
     tests/BeatDetectorTest.cpp
     tests/ConfigTest.cpp
+    tests/ControlTest.cpp
+    src/control/SunTimes.cpp
+    src/control/Scheduler.cpp
+    src/control/Profiles.cpp
     src/config/AppConfig.cpp
     src/core/StringUtil.cpp
     src/audio/SpectrumAnalyzer.cpp

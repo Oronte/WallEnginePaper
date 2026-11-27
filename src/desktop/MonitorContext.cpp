@@ -262,8 +262,8 @@ void MonitorContext::UpdatePointer(const GlobalPointerState& pointer, float delt
 
     // Lissage exponentiel independant du framerate.
     const float blend = deltaSeconds > 0.0f ? 1.0f - std::exp(-deltaSeconds * kParallaxResponsiveness) : 1.0f;
-    mouse_.parallaxX += (mouse_.normX - mouse_.parallaxX) * blend;
-    mouse_.parallaxY += (mouse_.normY - mouse_.parallaxY) * blend;
+    mouse_.parallaxX += ((parallaxEnabled_ ? mouse_.normX : 0.0f) - mouse_.parallaxX) * blend;
+    mouse_.parallaxY += ((parallaxEnabled_ ? mouse_.normY : 0.0f) - mouse_.parallaxY) * blend;
 
     const bool pressedHere = pointer.primaryDown && pointer.overDesktop && mouse_.inside;
     if (pressedHere && !mouse_.pressed) {

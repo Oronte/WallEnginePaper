@@ -1,0 +1,2 @@
+logo.png | 10.0 s, 10.0 FPS, CPU processus 7.8 ms/s (0.78 % d'un coeur)
+aurora.hlsl | 10.1 s, 60.0 FPS, CPU processus 40.3 ms/s (4.03 % d'un coeur)

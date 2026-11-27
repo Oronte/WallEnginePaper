@@ -96,6 +96,86 @@ struct PlaylistSettings {
     TransitionSettings transition;
 };
 
+// --- Raccourcis clavier globaux -------------------------------------------------------------
+enum class HotkeyAction : uint8_t { Next, Previous, Pause, Mute, TogglePanel };
+inline constexpr size_t kHotkeyActionCount = 5;
+const char* ToString(HotkeyAction action) noexcept;  // cle JSON stable
+
+// Combinaison : modificateurs MOD_ALT (1) | MOD_CONTROL (2) | MOD_SHIFT (4) | MOD_WIN (8) + code de touche virtuelle.
+struct Hotkey {
+    uint32_t modifiers = 0;
+    uint32_t key = 0;  // 0 = aucun raccourci
+    bool Empty() const noexcept { return key == 0; }
+    bool operator==(const Hotkey&) const = default;
+};
+// "Ctrl+Alt+Right" (JSON) <-> Hotkey ; FormatHotkey(..., true) donne un libelle lisible ("Ctrl + Alt + Flèche droite").
+std::string FormatHotkey(const Hotkey& hotkey, bool display = false);
+std::optional<Hotkey> ParseHotkey(std::string_view text);
+
+struct HotkeySettings {
+    bool enabled = true;
+    std::array<Hotkey, kHotkeyActionCount> keys = DefaultHotkeys();
+    static std::array<Hotkey, kHotkeyActionCount> DefaultHotkeys() noexcept;
+};
+
+// --- Planification ---------------------------------------------------------------------------
+enum class ScheduleMode : uint8_t { TimeSlots, Sun, Theme };
+
+struct TimeSlot {
+    uint32_t startMinutes = 7 * 60;  // minutes depuis minuit
+    uint32_t endMinutes = 19 * 60;   // fin exclue ; fin <= debut : la plage passe minuit
+    WallpaperRef wallpaper;
+    bool operator==(const TimeSlot&) const = default;
+};
+
+struct ScheduleSettings {
+    bool enabled = false;
+    ScheduleMode mode = ScheduleMode::TimeSlots;
+    std::vector<TimeSlot> slots;
+    // Soleil : coordonnees saisies a la main (aucune geolocalisation), decalages en minutes.
+    double latitude = 48.8566;
+    double longitude = 2.3522;
+    int sunriseOffsetMinutes = 0;
+    int sunsetOffsetMinutes = 0;
+    WallpaperRef dayWallpaper;
+    WallpaperRef nightWallpaper;
+    // Theme clair / sombre de Windows (AppsUseLightTheme).
+    WallpaperRef lightWallpaper;
+    WallpaperRef darkWallpaper;
+};
+
+// --- Profils ---------------------------------------------------------------------------------
+struct Profile {
+    std::string name;
+    uint32_t fpsLimit = 60;
+    float renderScale = 1.0f;
+    bool pauseOnFullscreen = true;
+    bool pauseOnMaximized = false;
+    bool pauseOnBattery = true;
+    float volume = 0.5f;
+    bool muted = false;
+    bool operator==(const Profile&) const = default;
+};
+
+// Bascule automatique : quand executable (ex. "game.exe", insensible a la casse) est au premier plan.
+struct ProfileRule {
+    std::string executable;
+    std::string profile;
+    bool operator==(const ProfileRule&) const = default;
+};
+
+struct ProfileSettings {
+    std::string active;        // profil choisi a la main ("" = reglages de base, sans profil)
+    bool autoSwitch = true;    // regles par executable
+    std::string batteryProfile = "Batterie";  // applique sur batterie ("" = aucun)
+    std::vector<ProfileRule> rules;
+    std::vector<Profile> profiles = DefaultProfiles();
+    static std::vector<Profile> DefaultProfiles();
+};
+
+// Accessibilite : "Afficher les animations dans Windows" (SPI_GETCLIENTAREAANIMATION).
+enum class ReducedMotion : uint8_t { Auto, On, Off };
+
 struct AppConfig {
     // v2 : renommage WallEnginePaper, lancement avec Windows active par defaut.
     static constexpr int kCurrentVersion = 2;
@@ -114,6 +194,10 @@ struct AppConfig {
     AudioSettings audio;
     PlaylistSettings playlist;
     TransitionSettings transition;
+    HotkeySettings hotkeys;
+    ScheduleSettings schedule;
+    ProfileSettings profiles;
+    ReducedMotion reducedMotion = ReducedMotion::Auto;
     bool startWithWindows = true;
     std::vector<std::filesystem::path> libraryFolders;
 

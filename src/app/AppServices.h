@@ -8,6 +8,8 @@
 #include <vector>
 
 #include "config/AppConfig.h"
+#include "control/HotkeyManager.h"
+#include "control/Profiles.h"
 #include "desktop/MonitorEnumerator.h"
 #include "wallpaper/IWallpaperBackend.h"
 
@@ -55,6 +57,7 @@ public:
     virtual void SetWallpaperParameter(const LibraryItem& item, const std::string& name, const ParamValue& value) = 0;
     virtual void ResetWallpaperParameters(const LibraryItem& item) = 0;
     virtual void NextWallpaper() = 0;
+    virtual void PreviousWallpaper() = 0;
     // Backend actuellement affiche pour ce fond (reglages des fonds web, qui n'ont pas d'apercu), ou nullptr.
     virtual IWallpaperBackend* LiveBackendFor(const LibraryItem& item) = 0;
 
@@ -85,6 +88,15 @@ public:
     virtual void SetStartWithWindows(bool enabled) = 0;
     virtual void RestartPlaylistTimer() = 0;
     virtual double MinutesUntilPlaylistChange() const = 0;
+    // Raccourcis, planification, profils, accessibilite
+    virtual void ApplyHotkeys() = 0;                  // apres modification des raccourcis
+    virtual void SuspendHotkeys(bool suspended) = 0;  // pendant la saisie d'un raccourci dans l'interface
+    virtual HotkeyStatus HotkeyState(HotkeyAction action) const = 0;
+    virtual void RefreshAutomation() = 0;             // planification, profils ou accessibilite modifies
+    virtual std::wstring ScheduleStatus() const = 0;
+    virtual const EffectiveSettings& Effective() const = 0;
+    virtual bool SystemAnimationsEnabled() const = 0;
+
     virtual void OpenConfigFolder() = 0;
     virtual void OpenLogFile() = 0;
 };

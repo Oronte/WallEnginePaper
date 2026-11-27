@@ -11,6 +11,8 @@
 
 #include "app/AppServices.h"
 #include "audio/AudioCapture.h"
+#include "control/HotkeyManager.h"
+#include "control/Profiles.h"
 #include "config/ConfigManager.h"
 #include "core/Win32Util.h"
 #include "desktop/DesktopHost.h"
@@ -61,6 +63,7 @@ public:
     void SetWallpaperParameter(const LibraryItem& item, const std::string& name, const ParamValue& value) override;
     void ResetWallpaperParameters(const LibraryItem& item) override;
     void NextWallpaper() override;
+    void PreviousWallpaper() override;
     IWallpaperBackend* LiveBackendFor(const LibraryItem& item) override;
     void SetVolume(float volume) override;
     void SetMuted(bool muted) override;
@@ -82,6 +85,13 @@ public:
     void SetStartWithWindows(bool enabled) override;
     void RestartPlaylistTimer() override;
     double MinutesUntilPlaylistChange() const override;
+    void ApplyHotkeys() override;
+    void SuspendHotkeys(bool suspended) override;
+    HotkeyStatus HotkeyState(HotkeyAction action) const override { return hotkeys_.Status(action); }
+    void RefreshAutomation() override;
+    std::wstring ScheduleStatus() const override { return scheduleStatus_; }
+    const EffectiveSettings& Effective() const override { return effective_; }
+    bool SystemAnimationsEnabled() const override { return systemAnimations_; }
     void OpenConfigFolder() override;
     void OpenLogFile() override;
 
@@ -126,7 +136,18 @@ private:
     void MaintenanceTick();
     void PlaylistTick();
     std::vector<const LibraryItem*> RotationCandidates() const;
-    void AdvanceWallpapers();
+    void AdvanceWallpapers(int direction = 1);
+    void ApplyWallpaperRef(const WallpaperRef& ref, const std::string& monitorId, const TransitionRequest& transition);
+    void RememberCurrent(const MonitorContext& surface);
+
+    // Profils et accessibilite : reglages effectifs recalcules, seules les differences sont appliquees.
+    void RefreshEffectiveSettings(const std::string& profile);
+    std::string DesiredProfile() const;
+    void ProfileTick();
+    void ScheduleTick(bool force);
+    bool ScheduleOwnsWallpaper() const;
+    void OnHotkey(HotkeyAction action);
+    void ToggleControlPanel();
 
     void OpenControlPanel();
     void CloseControlPanel();
@@ -200,6 +221,16 @@ private:
     uint64_t warmTickMs_ = 0;
     uint64_t warmFrames_ = 0;
     std::mt19937 random_{std::random_device{}()};
+
+    HotkeyManager hotkeys_;
+    EffectiveSettings effective_;
+    std::string pendingProfile_;
+    int pendingProfileTicks_ = 0;
+    bool systemAnimations_ = true;
+    bool lightTheme_ = true;
+    WallpaperRef scheduleTarget_;  // dernier fond impose par la planification
+    std::wstring scheduleStatus_;
+    std::map<std::string, std::vector<WallpaperRef>> history_;  // par ecran : fonds precedents (Fond precedent)
 };
 
 }  // namespace lwe

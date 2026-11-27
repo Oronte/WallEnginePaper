@@ -9,6 +9,7 @@
 #include <imgui.h>
 
 #include "config/ConfigManager.h"
+#include "control/Scheduler.h"
 #include "core/Paths.h"
 #include "core/StringUtil.h"
 #include "library/Library.h"
@@ -146,7 +147,11 @@ ControlPanelViews::ControlPanelViews(IAppServices& services, HWND owner) : servi
     logo_ = LoadTextureFromResource(services_.Device().Device(), IDR_LOGO_PNG, 256);
 }
 
-ControlPanelViews::~ControlPanelViews() = default;
+ControlPanelViews::~ControlPanelViews() {
+    if (capturingHotkey_ >= 0) {
+        services_.SuspendHotkeys(false);  // fenetre fermee pendant une saisie
+    }
+}
 
 void ControlPanelViews::SetStyle(const ui::Fonts& fonts, float scale) {
     fonts_ = fonts;
@@ -199,6 +204,7 @@ void ControlPanelViews::Draw(float deltaSeconds) {
     case Tab::Library: DrawLibrary(deltaSeconds); break;
     case Tab::Screens: DrawScreens(); break;
     case Tab::Playlist: DrawPlaylist(); break;
+    case Tab::Automation: DrawAutomation(); break;
     case Tab::Settings: DrawSettings(); break;
     }
     ImGui::EndChild();
@@ -250,6 +256,7 @@ void ControlPanelViews::DrawHeader() {
         {Tab::Library, icon::kLibrary, "Bibliothèque"},
         {Tab::Screens, icon::kMonitor, "Écrans"},
         {Tab::Playlist, icon::kPlaylist, "Playlist"},
+        {Tab::Automation, icon::kTimer, "Automatisation"},
         {Tab::Settings, icon::kSettings, "Paramètres"},
     };
     const float tabHeight = ImGui::GetFrameHeight() + 4 * s;
@@ -1279,6 +1286,432 @@ void ControlPanelViews::DrawPlaylist() {
 }
 
 // --------------------------------------------------------------------------------------------- //
+//  Raccourcis clavier
+// --------------------------------------------------------------------------------------------- //
+
+bool ControlPanelViews::OnKeyDown(unsigned int virtualKey) {
+    if (capturingHotkey_ < 0) {
+        return false;
+    }
+    switch (virtualKey) {
+    case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+    case VK_MENU: case VK_LMENU: case VK_RMENU:
+    case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
+    case VK_LWIN: case VK_RWIN:
+        return true;  // on attend la touche principale
+    default:
+        break;
+    }
+    HotkeySettings& hotkeys = services_.Config().Data().hotkeys;
+    const size_t action = static_cast<size_t>(capturingHotkey_);
+    if (virtualKey == VK_ESCAPE) {
+        capturingHotkey_ = -1;
+        services_.SuspendHotkeys(false);
+        return true;
+    }
+    if (virtualKey == VK_BACK) {
+        hotkeys.keys[action] = Hotkey{};
+    } else {
+        Hotkey hotkey;
+        hotkey.key = virtualKey;
+        if (GetKeyState(VK_CONTROL) < 0) hotkey.modifiers |= MOD_CONTROL;
+        if (GetKeyState(VK_MENU) < 0) hotkey.modifiers |= MOD_ALT;
+        if (GetKeyState(VK_SHIFT) < 0) hotkey.modifiers |= MOD_SHIFT;
+        if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0) hotkey.modifiers |= MOD_WIN;
+        // Sans modificateur, seules les touches qui ne servent pas a taper du texte sont acceptees.
+        const bool standalone = (virtualKey >= VK_F13 && virtualKey <= VK_F24) || virtualKey == VK_PAUSE ||
+                                (virtualKey >= VK_VOLUME_MUTE && virtualKey <= VK_MEDIA_PLAY_PAUSE);
+        if (hotkey.modifiers == 0 && !standalone) {
+            Toast("Ajoutez Ctrl, Alt, Maj ou Win à la combinaison");
+            return true;
+        }
+        hotkeys.keys[action] = hotkey;
+    }
+    capturingHotkey_ = -1;
+    services_.ApplyHotkeys();  // reenregistre tout (fin de la suspension)
+    return true;
+}
+
+void ControlPanelViews::DrawHotkeys() {
+    const float s = scale_;
+    HotkeySettings& hotkeys = services_.Config().Data().hotkeys;
+    static constexpr const char* kNames[kHotkeyActionCount] = {"Fond suivant", "Fond précédent", "Pause / reprise",
+                                                               "Muet", "Afficher / masquer la fenêtre"};
+    if (ImGui::Checkbox("Raccourcis clavier globaux", &hotkeys.enabled)) {
+        services_.ApplyHotkeys();
+    }
+    ImGui::BeginDisabled(!hotkeys.enabled);
+    for (size_t i = 0; i < kHotkeyActionCount; ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(kNames[i]);
+        ImGui::SameLine(250 * s);
+        const bool capturing = capturingHotkey_ == static_cast<int>(i);
+        const std::string label = capturing ? std::string("Appuyez sur une combinaison…")
+                                            : FormatHotkey(hotkeys.keys[i], true);
+        if (capturing) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ToU32(color::kAccent, 0.45f));
+        }
+        if (ImGui::Button(label.c_str(), ImVec2(290 * s, 0))) {
+            if (capturingHotkey_ < 0) {
+                capturingHotkey_ = static_cast<int>(i);
+                services_.SuspendHotkeys(true);  // sinon la combinaison deja prise n'arriverait jamais ici
+            }
+        }
+        if (capturing) {
+            ImGui::PopStyleColor();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Effacer") && !hotkeys.keys[i].Empty()) {
+            hotkeys.keys[i] = Hotkey{};
+            services_.ApplyHotkeys();
+        }
+        // Etat : doublon interne, combinaison prise par une autre application, actif.
+        ImGui::SameLine();
+        std::string duplicateOf;
+        for (size_t j = 0; j < kHotkeyActionCount; ++j) {
+            if (j != i && !hotkeys.keys[i].Empty() && hotkeys.keys[j] == hotkeys.keys[i]) {
+                duplicateOf = kNames[j];
+            }
+        }
+        if (!capturing && !duplicateOf.empty()) {
+            ImGui::TextColored(color::kWarning, "%s  même raccourci que « %s »", icon::kWarning, duplicateOf.c_str());
+        } else if (!capturing && services_.HotkeyState(static_cast<HotkeyAction>(i)) == HotkeyStatus::Conflict) {
+            ImGui::TextColored(color::kWarning, "%s  déjà utilisé par une autre application", icon::kWarning);
+        } else if (!capturing && services_.HotkeyState(static_cast<HotkeyAction>(i)) == HotkeyStatus::Registered) {
+            ImGui::TextDisabled("%s", icon::kCheck);
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::SmallButton("Raccourcis par défaut")) {
+        hotkeys.keys = HotkeySettings::DefaultHotkeys();
+        services_.ApplyHotkeys();
+    }
+    ImGui::EndDisabled();
+    DimText(capturingHotkey_ >= 0 ? "Échap : annuler · Retour arrière : aucun raccourci"
+                                  : "Cliquez sur un raccourci pour le modifier. Ils fonctionnent même fenêtre fermée.");
+}
+
+// --------------------------------------------------------------------------------------------- //
+//  Automatisation : planification et profils
+// --------------------------------------------------------------------------------------------- //
+
+bool ControlPanelViews::WallpaperCombo(const char* id, WallpaperRef& ref) {
+    const std::string key = ref.Empty() ? std::string() : WallpaperSettingsKey(ref.source);
+    std::string preview = ref.Empty() ? "Aucun" : U8(ref.source.filename().wstring());
+    for (const auto& item : services_.GetLibrary().Items()) {
+        if (item.id == key) {
+            preview = U8(item.title);
+        }
+    }
+    bool changed = false;
+    ImGui::SetNextItemWidth(300 * scale_);
+    if (ImGui::BeginCombo(id, preview.c_str())) {
+        if (ImGui::Selectable("Aucun", ref.Empty())) {
+            ref = WallpaperRef{};
+            changed = true;
+        }
+        for (const auto& item : services_.GetLibrary().Items()) {
+            if (!item.supported) {
+                continue;
+            }
+            const std::string label = U8(item.title) + "##" + item.id;
+            if (ImGui::Selectable(label.c_str(), item.id == key)) {
+                ref = item.Ref();
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+void ControlPanelViews::DrawAutomation() {
+    ImGui::BeginChild("##automation", ImVec2(std::min(880.0f * scale_, ImGui::GetContentRegionAvail().x), 0));
+    DrawSchedule();
+    ImGui::Spacing();
+    ImGui::Spacing();
+    DrawProfiles();
+    ImGui::EndChild();
+}
+
+void ControlPanelViews::DrawSchedule() {
+    const float s = scale_;
+    ScheduleSettings& schedule = services_.Config().Data().schedule;
+    bool changed = false;
+    ImGui::PushFont(fonts_.heading);
+    ImGui::TextUnformatted("Planification");
+    ImGui::PopFont();
+    DimText("Change de fond selon l'heure, le soleil ou le thème de Windows (prioritaire sur la playlist).");
+    ImGui::Spacing();
+    changed |= ImGui::Checkbox("Activer la planification", &schedule.enabled);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", U8(services_.ScheduleStatus()).c_str());
+    ImGui::BeginDisabled(!schedule.enabled);
+    int mode = static_cast<int>(schedule.mode);
+    changed |= ImGui::RadioButton("Plages horaires", &mode, 0);
+    ImGui::SameLine();
+    changed |= ImGui::RadioButton("Lever et coucher du soleil", &mode, 1);
+    ImGui::SameLine();
+    changed |= ImGui::RadioButton("Thème clair / sombre de Windows", &mode, 2);
+    schedule.mode = static_cast<ScheduleMode>(mode);
+    ImGui::Spacing();
+
+    switch (schedule.mode) {
+    case ScheduleMode::TimeSlots: {
+        int removed = -1;
+        for (size_t i = 0; i < schedule.slots.size(); ++i) {
+            TimeSlot& slot = schedule.slots[i];
+            ImGui::PushID(static_cast<int>(i));
+            // Pas de 15 minutes ; la fin peut valoir 24:00.
+            int start = static_cast<int>(slot.startMinutes / 15);
+            int end = static_cast<int>(slot.endMinutes / 15);
+            ImGui::SetNextItemWidth(120 * s);
+            if (ImGui::SliderInt("##start", &start, 0, 95, FormatMinutes(start * 15.0).c_str())) {
+                slot.startMinutes = static_cast<uint32_t>(start * 15);
+            }
+            changed |= ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::SameLine();
+            ImGui::TextUnformatted("→");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120 * s);
+            if (ImGui::SliderInt("##end", &end, 0, 96, FormatMinutes(end * 15.0).c_str())) {
+                slot.endMinutes = static_cast<uint32_t>(end * 15);
+            }
+            changed |= ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::SameLine();
+            changed |= WallpaperCombo("##slot_wallpaper", slot.wallpaper);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(icon::kDelete)) {
+                removed = static_cast<int>(i);
+            }
+            ImGui::PopID();
+        }
+        if (removed >= 0) {
+            schedule.slots.erase(schedule.slots.begin() + removed);
+            changed = true;
+        }
+        if (ImGui::Button(WithIcon(icon::kAdd, "Ajouter une plage").c_str())) {
+            TimeSlot slot;
+            if (!schedule.slots.empty()) {
+                slot.startMinutes = schedule.slots.back().endMinutes % 1440;
+                slot.endMinutes = (slot.startMinutes + 12 * 60) % 1440;
+            }
+            schedule.slots.push_back(slot);
+            changed = true;
+        }
+        DimText("Une plage dont la fin précède le début passe minuit (ex. 22:00 → 06:00). Hors de toute plage, "
+                "le fond reste celui choisi.");
+        break;
+    }
+    case ScheduleMode::Sun:
+        ImGui::SetNextItemWidth(160 * s);
+        ImGui::InputDouble("Latitude", &schedule.latitude, 0.0, 0.0, "%.4f");
+        changed |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(160 * s);
+        ImGui::InputDouble("Longitude", &schedule.longitude, 0.0, 0.0, "%.4f");
+        changed |= ImGui::IsItemDeactivatedAfterEdit();
+        DimText("En degrés décimaux, nord et est positifs (ex. Paris 48.8566 / 2.3522). Calcul local (NOAA), "
+                "aucune géolocalisation.");
+        ImGui::SetNextItemWidth(200 * s);
+        ImGui::SliderInt("Décalage du lever", &schedule.sunriseOffsetMinutes, -120, 120, "%d min");
+        changed |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SetNextItemWidth(200 * s);
+        ImGui::SliderInt("Décalage du coucher", &schedule.sunsetOffsetMinutes, -120, 120, "%d min");
+        changed |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Fond de jour");
+        ImGui::SameLine(150 * s);
+        changed |= WallpaperCombo("##day", schedule.dayWallpaper);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Fond de nuit");
+        ImGui::SameLine(150 * s);
+        changed |= WallpaperCombo("##night", schedule.nightWallpaper);
+        break;
+    case ScheduleMode::Theme:
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Thème clair");
+        ImGui::SameLine(150 * s);
+        changed |= WallpaperCombo("##light", schedule.lightWallpaper);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Thème sombre");
+        ImGui::SameLine(150 * s);
+        changed |= WallpaperCombo("##dark", schedule.darkWallpaper);
+        DimText("Suit Paramètres Windows › Personnalisation › Couleurs › Mode des applications, en direct.");
+        break;
+    }
+    ImGui::EndDisabled();
+    if (changed) {
+        services_.RefreshAutomation();
+    }
+}
+
+void ControlPanelViews::DrawProfiles() {
+    const float s = scale_;
+    ProfileSettings& settings = services_.Config().Data().profiles;
+    bool changed = false;
+    ImGui::PushFont(fonts_.heading);
+    ImGui::TextUnformatted("Profils");
+    ImGui::PopFont();
+    DimText("Un profil regroupe images par seconde, qualité, règles de pause et volume.");
+    ImGui::Spacing();
+
+    const auto profileCombo = [&](const char* id, std::string& name, const char* none) {
+        bool picked = false;
+        ImGui::SetNextItemWidth(220 * s);
+        if (ImGui::BeginCombo(id, name.empty() ? none : name.c_str())) {
+            if (ImGui::Selectable(none, name.empty())) {
+                name.clear();
+                picked = true;
+            }
+            for (const auto& profile : settings.profiles) {
+                if (ImGui::Selectable(profile.name.c_str(), profile.name == name)) {
+                    name = profile.name;
+                    picked = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        return picked;
+    };
+
+    changed |= profileCombo("Profil choisi##active_profile", settings.active, "Aucun (réglages de base)");
+    const std::string& applied = services_.Effective().profile;
+    ImGui::SameLine();
+    ImGui::TextDisabled("Appliqué : %s", applied.empty() ? "aucun" : applied.c_str());
+    changed |= profileCombo("Sur batterie##battery_profile", settings.batteryProfile, "Aucun");
+
+    ImGui::Spacing();
+    changed |= ImGui::Checkbox("Bascule automatique selon l'application au premier plan", &settings.autoSwitch);
+    ImGui::BeginDisabled(!settings.autoSwitch);
+    int removedRule = -1;
+    for (size_t i = 0; i < settings.rules.size(); ++i) {
+        ProfileRule& rule = settings.rules[i];
+        ImGui::PushID(static_cast<int>(i) + 1000);
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("%s", rule.executable.c_str());
+        ImGui::SameLine(260 * s);
+        ImGui::TextDisabled("→");
+        ImGui::SameLine();
+        changed |= profileCombo("##rule_profile", rule.profile, "Aucun");
+        ImGui::SameLine();
+        if (ImGui::SmallButton(icon::kDelete)) {
+            removedRule = static_cast<int>(i);
+        }
+        ImGui::PopID();
+    }
+    if (removedRule >= 0) {
+        settings.rules.erase(settings.rules.begin() + removedRule);
+        changed = true;
+    }
+    ImGui::SetNextItemWidth(220 * s);
+    ImGui::InputTextWithHint("##rule_exe", "jeu.exe", ruleExecutable_, sizeof(ruleExecutable_));
+    ImGui::SameLine();
+    if (ImGui::Button(WithIcon(icon::kAdd, "Ajouter").c_str()) && ruleExecutable_[0] != '\0') {
+        settings.rules.push_back(ProfileRule{ruleExecutable_, settings.profiles.empty() ? "" : settings.profiles.front().name});
+        ruleExecutable_[0] = '\0';
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(WithIcon(icon::kFolderOpen, "Choisir un .exe…").c_str())) {
+        if (const auto exe = PickExecutable(owner_)) {
+            settings.rules.push_back(
+                ProfileRule{U8(exe->filename().wstring()), settings.profiles.empty() ? "" : settings.profiles.front().name});
+            changed = true;
+        }
+    }
+    ImGui::EndDisabled();
+    DimText("Priorité : application au premier plan, puis batterie, puis profil choisi. Bascule après ~1 s.");
+
+    ImGui::Spacing();
+    int removedProfile = -1;
+    for (size_t i = 0; i < settings.profiles.size(); ++i) {
+        Profile& profile = settings.profiles[i];
+        ImGui::PushID(static_cast<int>(i) + 2000);
+        const std::string header = profile.name + "###profile";
+        if (ImGui::CollapsingHeader(header.c_str())) {
+            ImGui::Indent();
+            char name[64] = {};
+            profile.name.copy(name, sizeof(name) - 1);
+            ImGui::SetNextItemWidth(220 * s);
+            if (ImGui::InputText("Nom", name, sizeof(name), ImGuiInputTextFlags_EnterReturnsTrue) && name[0] != '\0') {
+                const std::string oldName = profile.name;
+                profile.name = name;
+                // Les references au profil suivent le renommage.
+                for (auto& rule : settings.rules) {
+                    if (rule.profile == oldName) rule.profile = profile.name;
+                }
+                if (settings.active == oldName) settings.active = profile.name;
+                if (settings.batteryProfile == oldName) settings.batteryProfile = profile.name;
+                changed = true;
+            }
+            int fps = static_cast<int>(profile.fpsLimit);
+            ImGui::SetNextItemWidth(220 * s);
+            if (ImGui::SliderInt("Images par seconde", &fps, 5, 144)) {
+                profile.fpsLimit = static_cast<uint32_t>(fps);
+            }
+            changed |= ImGui::IsItemDeactivatedAfterEdit();
+            float quality = profile.renderScale * 100.0f;
+            ImGui::SetNextItemWidth(220 * s);
+            if (ImGui::SliderFloat("Qualité de rendu", &quality, 25.0f, 100.0f, "%.0f %%")) {
+                profile.renderScale = quality / 100.0f;
+            }
+            changed |= ImGui::IsItemDeactivatedAfterEdit();
+            changed |= ImGui::Checkbox("Pause en plein écran", &profile.pauseOnFullscreen);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Pause si fenêtre maximisée", &profile.pauseOnMaximized);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Pause sur batterie", &profile.pauseOnBattery);
+            float volume = profile.volume * 100.0f;
+            ImGui::SetNextItemWidth(220 * s);
+            if (ImGui::SliderFloat("Volume", &volume, 0.0f, 100.0f, "%.0f %%")) {
+                profile.volume = volume / 100.0f;
+            }
+            changed |= ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Muet", &profile.muted);
+            if (ImGui::SmallButton(WithIcon(icon::kDelete, "Supprimer ce profil").c_str())) {
+                removedProfile = static_cast<int>(i);
+            }
+            ImGui::Unindent();
+        }
+        ImGui::PopID();
+    }
+    if (removedProfile >= 0) {
+        settings.profiles.erase(settings.profiles.begin() + removedProfile);
+        changed = true;
+    }
+    if (ImGui::Button(WithIcon(icon::kAdd, "Nouveau profil").c_str())) {
+        Profile profile;
+        for (int n = 1;; ++n) {
+            profile.name = std::format("Profil {}", n);
+            if (!FindProfile(settings, profile.name)) {
+                break;
+            }
+        }
+        settings.profiles.push_back(profile);
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(WithIcon(icon::kReset, "Restaurer Gaming, Travail, Batterie").c_str())) {
+        for (const auto& builtin : ProfileSettings::DefaultProfiles()) {
+            if (const auto it = std::find_if(settings.profiles.begin(), settings.profiles.end(),
+                                             [&](const Profile& p) { return p.name == builtin.name; });
+                it != settings.profiles.end()) {
+                *it = builtin;
+            } else {
+                settings.profiles.push_back(builtin);
+            }
+        }
+        changed = true;
+    }
+    if (changed) {
+        services_.RefreshAutomation();
+    }
+}
+
+// --------------------------------------------------------------------------------------------- //
 //  Parametres
 // --------------------------------------------------------------------------------------------- //
 
@@ -1353,6 +1786,25 @@ void ControlPanelViews::DrawSettings() {
     dirty |= DrawTransitionSettings(config.transition, "global");
     DimText("Au changement de fond (manuel, playlist, planification), l'ancien et le nouveau sont mélangés. Les "
             "fonds web passent en coupe nette.");
+
+    section(icon::kTimer, "Raccourcis clavier");
+    DrawHotkeys();
+
+    section(icon::kInfo, "Accessibilité");
+    {
+        static constexpr const char* kModes[] = {"Automatique (suivre Windows)", "Toujours", "Jamais"};
+        int mode = static_cast<int>(config.reducedMotion);
+        ImGui::SetNextItemWidth(260 * s);
+        if (ImGui::Combo("Animations réduites", &mode, kModes, 3)) {
+            config.reducedMotion = static_cast<ReducedMotion>(mode);
+            services_.RefreshAutomation();
+        }
+        ImGui::TextDisabled("Windows : animations %s · mode réduit %s",
+                            services_.SystemAnimationsEnabled() ? "activées" : "désactivées",
+                            services_.Effective().reducedMotion ? "actif" : "inactif");
+        DimText("Mode réduit : 15 images/s au plus, ni parallaxe ni transition. En automatique, il suit le "
+                "réglage « Afficher les animations dans Windows ».");
+    }
 
     section(icon::kVolume, "Audio");
     bool muted = config.audio.muted;

@@ -251,6 +251,10 @@ LRESULT CALLBACK ControlPanel::StaticWindowProc(HWND window, UINT message, WPARA
 }
 
 LRESULT ControlPanel::WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    // Saisie d'un raccourci clavier : la touche est capturee avant ImGui (Alt, F10... compris).
+    if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && views_ && views_->OnKeyDown(static_cast<UINT>(wParam))) {
+        return 0;
+    }
     if (imguiReady_ && ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam)) {
         return TRUE;
     }

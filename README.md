@@ -39,8 +39,41 @@ L'exécutable : `build\vs2026\Release\WallEnginePaper.exe` (garder le dossier `a
 - **Écrans** : schéma des écrans à l'échelle avec leur fond, mode « un fond par écran » ou « étendu ».
 - **Playlist** : rotation automatique (intervalle, ordre aléatoire, changement au démarrage, sélection des fonds,
   transition propre à la playlist).
-- **Paramètres** : FPS (15/30/60/144 ou libre), qualité de rendu, transitions, volume et sourdine, audio réactif,
-  règles de pause automatique, démarrage avec Windows, dossiers de bibliothèque, dépannage, à propos.
+- **Automatisation** : planification (plages horaires, lever / coucher du soleil, thème clair / sombre) et profils
+  (choix manuel, profil sur batterie, règles par application au premier plan, éditeur de profils).
+- **Paramètres** : FPS (15/30/60/144 ou libre), qualité de rendu, transitions, raccourcis clavier, accessibilité,
+  volume et sourdine, audio réactif, règles de pause automatique, démarrage avec Windows, dossiers de
+  bibliothèque, dépannage, à propos.
+
+## Contrôle et confort
+
+- **Raccourcis clavier globaux** (`RegisterHotKey`, actifs même fenêtre fermée), modifiables dans *Paramètres ›
+  Raccourcis clavier* (clic puis combinaison ; Échap annule, Retour arrière efface) :
+
+  | Action | Par défaut |
+  |---|---|
+  | Fond suivant | Ctrl + Alt + → |
+  | Fond précédent | Ctrl + Alt + ← |
+  | Pause / reprise | Ctrl + Alt + P |
+  | Muet | Ctrl + Alt + M |
+  | Afficher / masquer la fenêtre | Ctrl + Alt + W |
+
+  Conflits signalés : même combinaison pour deux actions, ou combinaison déjà prise par une autre application.
+  Une combinaison sans Ctrl / Alt / Maj / Win n'est acceptée que pour F13–F24, Pause et les touches multimédia.
+- **Fond précédent** : historique par écran (20 fonds), sinon ordre de rotation à rebours.
+- **Planification** (onglet *Automatisation*, prioritaire sur la playlist) :
+  - plages horaires (pas de 15 min, une plage peut passer minuit, hors plage le fond reste celui choisi) ;
+  - lever et coucher du soleil calculés localement (algorithme du NOAA, précision ~1 min) à partir d'une latitude
+    et d'une longitude saisies à la main, avec décalages ; soleil de minuit et nuit polaire gérés ;
+  - thème clair / sombre de Windows (`AppsUseLightTheme`, suivi en direct via `WM_SETTINGCHANGE`).
+  Le fond n'est imposé qu'au changement de créneau : un choix manuel reste en place jusqu'au créneau suivant.
+- **Profils** : *Gaming* (30 FPS, qualité 75 %, muet, pause si maximisé), *Travail* (30 FPS, volume 30 %),
+  *Batterie* (15 FPS, qualité 50 %, ralenti plutôt qu'arrêté sur batterie), plus des profils personnalisés
+  (FPS, qualité, règles de pause, volume, muet). Priorité : règle de l'application au premier plan (ex.
+  `game.exe`), puis profil « sur batterie », puis profil choisi ; bascule après ~1 s de stabilité.
+- **Accessibilité** : « Afficher les animations dans Windows » est respecté (`SPI_GETCLIENTAREAANIMATION`, suivi en
+  direct). Mode réduit (automatique, toujours ou jamais) : 15 FPS au plus, ni parallaxe ni transition.
+- **Zone de notification** : Fond précédent, Planification (case à cocher), sous-menu Profil.
 
 ## Transitions
 
@@ -131,6 +164,8 @@ src/
   render/                      Device D3D11 partagé, FrameLimiter, RenderTexture, TextureLoader (WIC),
                                TransitionRenderer (shader de transition)
   system/Autostart.*           Clé Run de l'utilisateur
+  system/SystemInfo.*          Thème clair/sombre, animations Windows, couleur d'accent, application au premier plan
+  control/                     SunTimes (NOAA), Scheduler, Profiles (réglages effectifs), HotkeyManager
   watchdog/PerformanceWatchdog.*  Plein écran / maximisé par écran, batterie, mode présentation
   wallpaper/IWallpaperBackend.h, WallpaperFactory.*   Contrat commun, fabrique
   wallpaper/shader/            ShaderBackend (HLSL style Shadertoy)
@@ -189,6 +224,9 @@ nombre de beats, charleston ignoré), décroissance de l'intensité, silence, br
 du tempo, sensibilité. `LWE_BEAT_TRACE=1` affiche la nouveauté et le seuil image par image.
 `tests/ConfigTest.cpp` : aller-retour JSON des nouveaux réglages, ancien `config.json` (valeurs par défaut),
 valeurs aberrantes bornées, transition aléatoire toujours concrète.
+`tests/ControlTest.cpp` : lever / coucher du soleil (Paris été / hiver, New York, Sydney, Tromsø polaire),
+plages horaires (passage de minuit, trou, fin exclue), modes soleil et thème, format et lecture des raccourcis,
+correspondance d'exécutable, priorité des profils, réglages effectifs (profil, animations réduites).
 
 ## Points d'architecture
 
