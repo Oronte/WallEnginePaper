@@ -677,7 +677,8 @@ void ControlPanelViews::RenderPreview(float deltaSeconds, const MouseState& mous
     frame.width = kPreviewWidth;
     frame.height = kPreviewHeight;
     frame.mouse = mouse;
-    frame.audio = &silence_;
+    services_.CurrentAudio(previewAudio_);  // l'apercu reagit a la musique comme le vrai fond
+    frame.audio = &previewAudio_;
     previewBackend_->Render(previewTarget_.rtv.Get(), frame);
 }
 
@@ -1331,6 +1332,45 @@ void ControlPanelViews::DrawSettings() {
     }
     ImGui::EndDisabled();
     DimText("S'applique aux fonds vidéo et web. Une même vidéo affichée sur plusieurs écrans n'est jouée qu'une fois.");
+
+    ImGui::Spacing();
+    bool reactive = config.audio.reactive;
+    if (ImGui::Checkbox("Fonds réactifs au son joué par le PC", &reactive)) {
+        services_.SetAudioReactive(reactive);
+    }
+    ImGui::BeginDisabled(!reactive);
+    float sensitivity = config.audio.sensitivity;
+    ImGui::SetNextItemWidth(340 * s);
+    if (ImGui::SliderFloat("Sensibilité##audio_sensitivity", &sensitivity, 0.0f, 4.0f, "%.2f")) {
+        services_.SetAudioSensitivity(sensitivity);
+    }
+    // Spectre en direct (64 bandes) : retour immediat sur la capture.
+    AudioSpectrum spectrum;
+    services_.CurrentAudio(spectrum);
+    const float width = std::min(520.0f * s, ImGui::GetContentRegionAvail().x);
+    const float height = 64.0f * s;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    drawList->AddRectFilled(origin, origin + ImVec2(width, height), ToU32(color::kPanel), 8 * s);
+    const float barWidth = width / static_cast<float>(kAudioBandCount);
+    for (size_t i = 0; i < kAudioBandCount; ++i) {
+        const float value = std::clamp(spectrum.bands[i], 0.0f, 1.0f);
+        const float x0 = origin.x + barWidth * static_cast<float>(i) + 1.0f;
+        const float y0 = origin.y + height - 4 * s - (height - 8 * s) * value;
+        const float t = static_cast<float>(i) / static_cast<float>(kAudioBandCount - 1);
+        const ImVec4 barColor(color::kAccent.x + (color::kAccent2.x - color::kAccent.x) * t,
+                              color::kAccent.y + (color::kAccent2.y - color::kAccent.y) * t,
+                              color::kAccent.z + (color::kAccent2.z - color::kAccent.z) * t, 1.0f);
+        drawList->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barWidth - 2.0f, origin.y + height - 4 * s), ToU32(barColor), 2.0f);
+    }
+    ImGui::Dummy(ImVec2(width, height));
+    const std::wstring device = services_.AudioDeviceName();
+    ImGui::TextDisabled("%s", device.empty() ? (reactive ? "Aucune sortie audio capturée pour l'instant"
+                                                         : "Capture désactivée")
+                                             : ("Capture de : " + U8(device)).c_str());
+    ImGui::EndDisabled();
+    DimText("Seul le son envoyé aux haut-parleurs est analysé (jamais le micro), sur ce PC uniquement. "
+            "La capture s'arrête dès que les fonds sont en pause.");
 
     section(icon::kPause, "Pause automatique");
     dirty |= ImGui::Checkbox("Quand un jeu ou une application est en plein écran sur l'écran", &config.pause.onFullscreenApp);

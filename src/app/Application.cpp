@@ -307,6 +307,7 @@ void Application::Shutdown() {
     shutDown_ = true;
     running_ = false;
     LogSessionStatistics();
+    audioCapture_.SetEnabled(false);
 
     if (controlWindow_) {
         KillTimer(controlWindow_, kTimerMaintenance);
@@ -513,6 +514,7 @@ FrameTiming Application::NextTiming() {
 }
 
 void Application::RenderFrame() {
+    CurrentAudio(audio_);
     input_.Update();
     const FrameTiming timing = NextTiming();
     for (auto& surface : surfaces_) {
@@ -578,6 +580,7 @@ void Application::ApplyPauseState() {
         qpcLast_ = QpcNow();
         limiter_.Reset();
     }
+    UpdateAudioCapture();
 }
 
 void Application::SetPauseReason(uint32_t reason, bool active) {
@@ -663,6 +666,7 @@ void Application::MaintenanceTick() {
     }
     ReplaceFailedBackends();
     PlaylistTick();
+    UpdateAudioCapture();
 }
 
 void Application::ReplaceFailedBackends() {
@@ -686,6 +690,37 @@ void Application::ReplaceFailedBackends() {
         }
         surface->SetPaused(IsPaused(), surface->IsAutoPaused());
     }
+}
+
+void Application::UpdateAudioCapture() {
+    // Capture seulement si la reactivite est activee ET que quelque chose est dessine (fonds ou interface) :
+    // en jeu plein ecran ou en pause, aucun thread audio ne tourne.
+    const bool uiVisible = panel_ && panel_->IsVisible();
+    const bool wanted = config_.Data().audio.reactive && !shutDown_ && (IsRendering() || uiVisible);
+    if (wanted != audioCapture_.IsEnabled()) {
+        audioCapture_.SetEnabled(wanted);
+        log::Info(L"Audio : capture {}", wanted ? L"demarree" : L"arretee");
+    }
+}
+
+void Application::CurrentAudio(AudioSpectrum& out) const {
+    audioCapture_.Snapshot(out);
+    const float sensitivity = config_.Data().audio.sensitivity;
+    for (auto& band : out.bands) {
+        band = std::min(1.0f, band * sensitivity);
+    }
+    out.level = std::min(1.0f, out.level * sensitivity);
+}
+
+void Application::SetAudioReactive(bool reactive) {
+    config_.Data().audio.reactive = reactive;
+    config_.MarkDirty();
+    UpdateAudioCapture();
+}
+
+void Application::SetAudioSensitivity(float sensitivity) {
+    config_.Data().audio.sensitivity = std::clamp(sensitivity, 0.0f, 8.0f);
+    config_.MarkDirty();
 }
 
 void Application::ApplyAudioOutput() {
@@ -961,10 +996,12 @@ void Application::OpenControlPanel() {
     panel_->Show();
     uiLimiter_.Reset();
     uiQpcLast_ = QpcNow();
+    UpdateAudioCapture();
 }
 
 void Application::CloseControlPanel() {
     panel_.reset();
+    UpdateAudioCapture();
     if (!IsRendering() && config_.Data().pause.releaseGpuResources) {
         device_.Trim();
     }

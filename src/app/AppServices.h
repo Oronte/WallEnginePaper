@@ -9,13 +9,13 @@
 
 #include "config/AppConfig.h"
 #include "desktop/MonitorEnumerator.h"
+#include "wallpaper/IWallpaperBackend.h"
 
 namespace lwe {
 
 class ConfigManager;
 class RenderDevice;
 class Library;
-class IWallpaperBackend;
 struct LibraryItem;
 
 struct MonitorEntry {
@@ -61,6 +61,12 @@ public:
     // Audio des fonds video / web
     virtual void SetVolume(float volume) = 0;
     virtual void SetMuted(bool muted) = 0;
+
+    // Reactivite au son (capture du son joue par le PC + spectre)
+    virtual void SetAudioReactive(bool reactive) = 0;
+    virtual void SetAudioSensitivity(float sensitivity) = 0;
+    virtual void CurrentAudio(AudioSpectrum& out) const = 0;  // spectre courant (sensibilite globale appliquee)
+    virtual std::wstring AudioDeviceName() const = 0;
 
     // Etat et performances
     virtual bool IsManuallyPaused() const = 0;

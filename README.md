@@ -97,6 +97,7 @@ src/
   main.cpp
   app/AppServices.h            Interface lue/pilotée par l'UI (découplage UI ⇄ moteur)
   app/Application.*            Boucle cadencée (fonds + UI), surfaces, pauses, playlist, tray
+  audio/                       AudioCapture (WASAPI loopback), SpectrumAnalyzer (FFT 64 bandes)
   core/                        Log, chemins (%APPDATA%\WallEnginePaper), UTF-8/16, RAII Win32
   config/                      AppConfig + JSON, ConfigManager (sauvegarde atomique différée)
   desktop/                     DesktopHost (WorkerW classique + 24H2), écrans, MonitorContext (surface)
@@ -113,10 +114,32 @@ src/
   wallpaper/web/               WebBackend (WebView2 verrouillé en local + pont JS)
   ui/                          ControlPanel (fenêtre + ImGui), ControlPanelViews, UiStyle, TrayIcon, FileDialogs
 assets/web/constellation/      Fond web d'exemple (Canvas, réglages, souris)
+tests/                         Tests (ctest)
 ```
 
-À venir : capture audio WASAPI + FFT 64 bandes (l'API `iAudioSpectrum` / `wallEnginePaper.audio` est déjà en
-place, alimentée par du silence en attendant).
+## Fonds réactifs au son
+
+- **Capture** : WASAPI « loopback » sur la sortie audio par défaut : uniquement ce que le PC envoie aux
+  haut-parleurs (jamais le micro), analysé localement. Thread dédié, suit le changement de sortie (casque…).
+- **Analyse** : FFT de 2048 échantillons (fenêtre de Hann), nouvelle analyse tous les 512 échantillons
+  (~94/s), 64 bandes normalisées en dB (compensation +3 dB/octave), attaque rapide, relâchement lent.
+  Au-dessus d'environ 1 kHz les bandes sont logarithmiques ; en dessous, une bande par bin de FFT. Basses ≈
+  bandes 0 à 7.
+- **Utilisation** : shaders (`AudioBand(i)`, `AudioSample(x)`, `AudioBass/Mid/Treble()`, `iAudioLevel`),
+  fonds web (`wallEnginePaper.on('audio', …)`), aperçu de l'interface. Réglages : *Paramètres › Audio*
+  (activation, sensibilité, spectre en direct).
+- **Coût** : la capture ne tourne que si quelque chose est dessiné ; en pause ou en jeu plein écran, aucun
+  thread audio.
+
+## Tests
+
+```powershell
+cmake --build --preset vs2026-release --target WallEnginePaperTests
+ctest --test-dir build/vs2026 -C Release
+```
+
+`tests/SpectrumAnalyzerTest.cpp` : sinusoïdes pures (100 Hz à 12 kHz) dans la bonne bande, silence nul,
+retombée et niveau proportionnel au volume.
 
 ## Points d'architecture
 

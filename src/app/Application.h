@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "app/AppServices.h"
+#include "audio/AudioCapture.h"
 #include "config/ConfigManager.h"
 #include "core/Win32Util.h"
 #include "desktop/DesktopHost.h"
@@ -60,6 +61,10 @@ public:
     IWallpaperBackend* LiveBackendFor(const LibraryItem& item) override;
     void SetVolume(float volume) override;
     void SetMuted(bool muted) override;
+    void SetAudioReactive(bool reactive) override;
+    void SetAudioSensitivity(float sensitivity) override;
+    void CurrentAudio(AudioSpectrum& out) const override;
+    std::wstring AudioDeviceName() const override { return audioCapture_.DeviceName(); }
     bool IsManuallyPaused() const override { return (pauseReasons_ & kPauseManual) != 0; }
     void SetManualPause(bool paused) override { SetPauseReason(kPauseManual, paused); }
     std::wstring StatusText() const override;
@@ -104,6 +109,7 @@ private:
     bool AnySurfaceRunning() const;
     void ApplyPauseState();
     void ApplyAudioOutput();
+    void UpdateAudioCapture();
     void ReplaceFailedBackends();
     void WatchdogTick();
     void MaintenanceTick();
@@ -136,7 +142,8 @@ private:
     FrameLimiter limiter_;
     FrameLimiter uiLimiter_;
     TrayIcon tray_;
-    AudioSpectrum audio_;  // spectre nul tant qu'aucune source audio n'est branchee
+    AudioCapture audioCapture_;
+    AudioSpectrum audio_;  // spectre de l'image en cours (sensibilite globale appliquee)
     // Declares apres device_/desktop_ : detruits avant eux.
     std::vector<MonitorInfo> monitors_;
     std::vector<std::unique_ptr<MonitorContext>> surfaces_;

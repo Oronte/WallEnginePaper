@@ -34,6 +34,11 @@ set(LWE_SOURCES
     src/app/Application.h
     src/app/Application.cpp
 
+    src/audio/AudioCapture.h
+    src/audio/AudioCapture.cpp
+    src/audio/SpectrumAnalyzer.h
+    src/audio/SpectrumAnalyzer.cpp
+
     src/core/Log.h
     src/core/Log.cpp
     src/core/Paths.h
@@ -138,7 +143,7 @@ target_link_libraries(WallEnginePaper PRIVATE
     lwe::imgui
     d3d11 dxgi d3dcompiler dxguid dwmapi windowscodecs
     mfplat mfuuid mfreadwrite
-    user32 gdi32 shell32 ole32 uuid advapi32 shcore wtsapi32
+    user32 gdi32 shell32 ole32 uuid advapi32 shcore wtsapi32 ksuser
 )
 target_compile_definitions(WallEnginePaper PRIVATE LWE_HAS_IMGUI=1)
 
@@ -158,6 +163,15 @@ add_custom_command(TARGET WallEnginePaper POST_BUILD
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT WallEnginePaper)
 set_target_properties(WallEnginePaper PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:WallEnginePaper>")
+
+# --- Tests (ctest) -------------------------------------------------------------------------
+enable_testing()
+add_executable(WallEnginePaperTests tests/SpectrumAnalyzerTest.cpp src/audio/SpectrumAnalyzer.cpp)
+target_include_directories(WallEnginePaperTests PRIVATE src)
+target_compile_definitions(WallEnginePaperTests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_compile_options(WallEnginePaperTests PRIVATE /W4 /permissive- /utf-8 /EHsc)
+target_link_libraries(WallEnginePaperTests PRIVATE lwe::json)
+add_test(NAME SpectrumAnalyzer COMMAND WallEnginePaperTests)
 
 install(TARGETS WallEnginePaper RUNTIME DESTINATION .)
 install(DIRECTORY assets DESTINATION .)

@@ -98,7 +98,8 @@ private:
     double previewTime_ = 0.0;
     uint64_t previewFrame_ = 0;
     MouseState previewMouse_;
-    AudioSpectrum silence_;
+    AudioSpectrum silence_;       // miniatures : instantane sans son
+    AudioSpectrum previewAudio_;  // apercu en direct : spectre courant
 
     std::string toast_;
     float toastTime_ = 0.0f;
